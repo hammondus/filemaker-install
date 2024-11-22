@@ -1,0 +1,10 @@
+[Unit]
+Description=Automatically open databases if reboot due to new SSL
+After=default.target
+
+[Service]
+Type=simple
+ExecStart=/home/ubuntu/SSLrefresh/ServerStart.sh
+
+[Install]
+WantedBy=default.target

@@ -1,0 +1,798 @@
+#!/bin/bash
+set -u  # treat unset variables as an error
+set -o pipefail  #returns any error in the pipe, not just last command
+#set -x    # uncomment for debugging.
+
+OPTIONS=$1
+
+#
+#
+# Required
+# ALL The following variables are required
+# These variables won't work as is. They need to be set correctly
+# These variable contain sensitive info, so the real versions of these are kept
+# in a private directory which git ignores.
+
+### Start of Variables that are required to be overriden for this script to work at all.
+
+DOWNLOAD=https://downloads.claris.com/filemaker.zip
+HOSTNAME=fm.example.com
+CERTBOT_EMAIL=me@you.com
+#Server email notifications
+EMAIL_SENDER="email@server.com"
+EMAIL_REPLY="noreply@server.com"
+EMAIL_RECIPIENTS="me@you.com, you@me.com"
+SMTP_SERVER="smtp.server.com"
+SMTP_USER="mysmtpuser"
+SMTP_PASSWORD="mysmtppassword"
+
+# Server scripts from one of the databases are scheduled.
+# This is the user and password of that database.
+SCRIPT_USER="dog"
+SCRIPT_PASS="cat"
+
+# Microsoft OAuth settings.
+OAuthID="a69asdfa2c"
+OAuthKey="kU~0sadf"
+OAuthDirectoryID="dsdafedf"
+
+
+#
+# These variables will work as is, but should be set to appropraite values.
+TIMEZONE=Australia/Melbourne
+FM_ADMIN_USER=dog
+FM_ADMIN_PASSWORD=pass
+FM_ADMIN_PIN=1234
+
+#Databases, containers and backups are stored in these location which are then mounted on a seperate drive each.
+FM_DATA=/opt/FileMaker/Data
+FM_DATABASES=$FM_DATA/Databases
+FM_CONTAINERS=$FM_DATA/Containers
+FM_BACKUPS=/opt/FileMaker/Backups
+
+
+#
+# These are what works for me. Check they are suitable.
+# If you change $HOME_LOCATION or $SCRIPT_LOCATION, those variables are used in other scripts.
+HOME_LOCATION=/home/ubuntu
+SCRIPT_LOCATION=$HOME_LOCATION/filemaker-install   # this assumes you did the git clone from the home directory.
+STATE=$SCRIPT_LOCATION/state
+ASSISTED_FILE=$SCRIPT_LOCATION/fminstall/AssInst.txt
+INSTALLED_SCRIPTS=$HOME_LOCATION/fm_scripts     # Various scripts used after the install are put here.
+
+
+#The .pem file for the production server is required to be in the same directly as this script
+PEM=$SCRIPT_LOCATION/secrets/fm.pem
+### End of Variables that HAVE to be changed.
+
+#
+#
+# Override variables with private data
+# 
+#
+. $SCRIPT_LOCATION/secrets/variables    # variables that override many of the above variables.
+. $SCRIPT_LOCATION/secrets/fm_auth      # Filemaker server username and password used by various setup and post install scripts.
+
+# This shouldn't be changed for this script to work
+WEBROOTPATH="/opt/FileMaker/FileMaker Server/NginxServer/htdocs/httpsRoot/"
+
+#Be careful with the drive settings. The script doesn't check that what you have put in is correct.
+#Only put in devices that are completely blank. Devices listed below will be partitioned and formatted.
+DRIVE_DATABASES=/dev/nvme2n1
+DRIVE_CONTAINERS=/dev/nvme1n1
+DRIVE_BACKUPS=/dev/nvme3n1
+
+# Server Settings
+PARALLEL_BACKUPS=Yes   # Enable parallel backups
+EXTERNAL_AUTH=Yes
+
+
+# Optional software to install
+# Install optional programs I find handy. Change this to No if not needed
+GLANCES=Yes
+NCDU=Yes
+IOTOP=Yes
+
+# load in functions
+. $SCRIPT_LOCATION/functions
+
+#echo "If this install asks you to reboot and rerun the script, it is copied to ~/fm_install.sh"
+#read -p "Press return to continue "
+
+#Check we are on the correct version of Ubuntu
+if [ -f /etc/os-release ]; then
+  . /etc/os-release
+  VER=$VERSION_ID
+  if [ "$VER" != "22.04" ]; then
+    echo "Wrong version of Ubuntu. Must be 22.04"
+    echo "You are running" $VER 
+    exit 1
+  else
+    echo "Good. You are Ubuntu" $VER
+  fi
+fi
+
+# Link this script to the home directory so it can easily be run it after login
+if [ ! -f ~/fm_install.sh ]; then
+  ln -s $SCRIPT_LOCATION/fm_install.sh $HOME_LOCATION/fm_install.sh
+fi
+
+# Create directory where post install filemaker scripts will live
+if [ ! -d $INSTALLED_SCRIPTS ]; then
+  mkdir $INSTALLED_SCRIPTS || { echo "Couldn't create filemaker scripts directory: $INSTALLED_SCRIPTS"; exit 1; }
+fi
+
+# The state directory is used so that this script can keep track of where it is up to between reboots
+if [ ! -d $STATE ]; then
+  echo "creating state directory"
+  mkdir $STATE || { echo "Couldn't create state directory"; exit 1; }
+fi
+
+
+if [ ! -f $STATE/timezone-set ]; then 
+  sudo timedatectl set-timezone $TIMEZONE || { echo "Error setting timezone"; exit 1; }
+  timedatectl
+  touch $STATE/timezone-set
+fi
+
+if [ ! -f $STATE/hostname-set ]; then
+  sudo hostnamectl set-hostname $HOSTNAME || { echo "Error setting hostname"; exit 1; }
+  touch $STATE/hostname-set
+fi
+
+#Make sure the system is up to date and reboot if necessary
+if [ ! -f $STATE/apt-upgrade ]; then
+  echo 'apt update/upgrade not done. doing it now'
+  sudo apt update || { echo "Error running apt update"; exit 1; }
+  sudo DEBIAN_FRONTEND=noninteractive apt upgrade -y || { echo "Error running apt upgrade"; exit 1; }
+  touch $STATE/apt-upgrade
+  if [ -f /var/run/reboot-required ]; then
+    echo "Reboot is required. Reboot then rerun this script"
+    reboot_rerun
+  fi
+fi
+
+
+#Install unzip if it's not installed. Not optional
+#The download from claris needs to be unzipped.
+#jq is used to process JSON in the admin api
+
+type unzip > /dev/null 2>&1 || sudo apt install unzip -y
+type jq > /dev/null 2>&1 || sudo apt install jq -y
+
+#Install optional software if they have been selected
+if [ "$GLANCES" == "Yes" ]; then
+  type glances > /dev/null 2>&1 || sudo apt install glances -y || { echo "Error installing Glances"; exit 9; }
+fi
+if [ "$NCDU" == "Yes" ]; then
+  type ncdu > /dev/null 2>&1 || sudo apt install ncdu -y || { echo "Error installing NCDU"; exit 9; }
+fi
+if [ "$IOTOP" == "Yes" ]; then
+  type iotop > /dev/null 2>&1 || sudo apt install iotop-c -y || { echo "Error installing iotop-c"; exit 9; }
+fi
+
+
+# Partition, format and attached the additional drives.
+#
+
+if [ ! -f $STATE/drive-setup ]; then
+  echo "Label the drives"
+  sudo parted -s $DRIVE_DATABASES mklabel gpt || { echo "error with mklabel on database drive"; exit 1; }
+  sudo parted -s $DRIVE_CONTAINERS mklabel gpt || { echo "error with mklabel on containers drive"; exit 1; }
+  sudo parted -s $DRIVE_BACKUPS mklabel gpt || { echo "error with mklabel on backup drive"; exit 1; }
+
+  echo "Partition the drives"
+  sudo parted -s $DRIVE_DATABASES mkpart Databases 0% 100% || { echo "error with mkpark on database drive"; exit 1; }
+  sudo parted -s $DRIVE_CONTAINERS mkpart Containers 0% 100% || { echo "error with mkpart on containers drive"; exit 1; }
+  sudo parted -s $DRIVE_BACKUPS mkpart Backups 0% 100% || { echo "error with mkpart on backup drive"; exit 1; }
+  
+  echo "Format the drives"
+  sudo mkfs.ext4 -m 0 ${DRIVE_DATABASES}p1 || { echo "error with mkfs on database drive"; exit 1; }
+  sudo mkfs.ext4 -m 0 ${DRIVE_CONTAINERS}p1 || { echo "error with mkfs on containers drive"; exit 1; }
+  sudo mkfs.ext4 -m 0 ${DRIVE_BACKUPS}p1 || { echo "error with mkfs on backup drive"; exit 1; }
+
+  touch $STATE/drive-setup
+fi
+
+
+#Download filemaker
+if [ ! -f $STATE/filemaker-downloaded ]; then
+  rm -rf $SCRIPT_LOCATION/fmdownload
+  if mkdir $SCRIPT_LOCATION/fmdownload; then
+    cd $SCRIPT_LOCATION/fmdownload
+    if wget $DOWNLOAD; then
+      unzip ./fms*
+    else
+      echo "Error downloading filemaker."
+      exit 1
+    fi
+    touch $STATE/filemaker-downloaded
+  else
+    echo "Error creating Filemaker download directory at $SCRIPT_LOCATION/fmdownload"
+    exit 1
+  fi
+fi
+
+#Copy install file
+# The only thing we want from the claris .zip file is the *.deb installer.
+if [ ! -f $STATE/filemaker-install-file ]; then
+  mkdir $SCRIPT_LOCATION/fminstall
+  cp $SCRIPT_LOCATION/fmdownload/filemaker-server*.deb $SCRIPT_LOCATION/fminstall || { echo "Error copying .deb file to fminstall directory"; exit 1; }
+  touch $STATE/filemaker-install-file
+fi
+
+
+#Install filemaker
+if [ ! -f $STATE/filemaker-installed ]; then
+  cd $SCRIPT_LOCATION/fminstall
+  # Create the assisted install file.
+  echo "[Assisted Install]" > $ASSISTED_FILE
+  echo "License Accepted=1" >> $ASSISTED_FILE
+  echo "Deployment Options=0" >> $ASSISTED_FILE
+  echo "Admin Console User=$FM_ADMIN_USER" >> $ASSISTED_FILE
+  echo "Admin Console Password=$FM_ADMIN_PASSWORD" >> $ASSISTED_FILE
+  echo "Admin Console PIN=$FM_ADMIN_PIN" >> $ASSISTED_FILE
+  echo "Filter Databases=0" >> $ASSISTED_FILE
+  echo "Remove Sample Database=1" >> $ASSISTED_FILE
+  echo "Use HTTPS Tunneling=1" >> $ASSISTED_FILE
+  echo "Swap File Size=4G" >> $ASSISTED_FILE
+  echo "Swappiness=10" >> $ASSISTED_FILE
+
+  sudo FM_ASSISTED_INSTALL=$ASSISTED_FILE apt install ./filemaker-server*.deb -y || { echo "Error installing Filemaker"; exit 1; }
+  touch $STATE/filemaker-installed
+fi
+
+if [ ! -f $STATE/certbot-installed ]; then
+  sudo snap install --classic certbot || { echo "Error installing Certbot."; exit 1; }
+  sudo ln -s /snap/bin/certbot /usr/bin/certbot
+  touch $STATE/certbot-installed
+fi
+
+if [ ! -f $STATE/certbot-certificate ]; then
+  sudo service ufw stop
+  sudo certbot certonly --webroot \
+    -w "$WEBROOTPATH" \
+    -d $HOSTNAME \
+    --agree-tos --non-interactive \
+    -m $CERTBOT_EMAIL \
+    || { echo "Error getting Certificate with Certbot."; sudo service ufw start; exit 1; }
+  sudo service ufw start
+  touch $STATE/certbot-certificate
+
+  logoff_rerun   # need to logoff and on again now otherwise fmsadmin doesn't work without sudo
+fi
+
+if [ ! -f $STATE/certbot-certificate-loaded-filemaker ]; then
+  echo "Importing Certificates to filemaker:"
+  # The certs in the live directory are just links to the certs.
+  # fmsadmin can't handle using links to files, so we need to find where the actual certs are.
+  CERTFILEPATH=$(sudo realpath "/etc/letsencrypt/live/$HOSTNAME/fullchain.pem")
+  PRIVKEYPATH=$(sudo realpath "/etc/letsencrypt/live/$HOSTNAME/privkey.pem")
+  sudo fmsadmin certificate import $CERTFILEPATH --keyfile $PRIVKEYPATH \
+    -u $FM_ADMIN_USER -p $FM_ADMIN_PASSWORD -y || { echo "Filemaker unable to import certificate"; exit 1; }
+  sudo service fmshelper restart
+
+  touch $STATE/certbot-certificate-loaded-filemaker
+fi
+## At this point, the server should be up and running with an SSL cert.
+
+#Create additional directories for Databases, Containers & Backups and attached drives
+if [ ! -f $STATE/additional-directories ]; then
+  sudo mkdir -p $FM_DATABASES $FM_CONTAINERS $FM_BACKUPS || { echo "Unable to create Data / Backup directories"; exit 1; }
+
+  DATABASE_UUID=$(lsblk -n -o UUID ${DRIVE_DATABASES}p1)
+  CONTAINER_UUID=$(lsblk -n -o UUID ${DRIVE_CONTAINERS}p1)
+  BACKUP_UUID=$(lsblk -n -o UUID ${DRIVE_BACKUPS}p1)
+
+  #Check we have UUID's for all drives
+  if [ -z $DATABASE_UUID ] || [ -z $CONTAINER_UUID ] || [ -z $BACKUP_UUID ]; then
+    echo "Don't have all required UUID's"
+    echo DATABASE_UUID: $DATABASE_UUID
+    echo CONTAINER_UUID: $CONTAINER_UUID
+    echo BACKUP_UUID: $BACKUP_UUID
+    exit 1
+  fi
+  
+  if [ ! -f $STATE/fstab ]; then
+    echo "UUID=$DATABASE_UUID  $FM_DATABASES ext4 defaults,nofail 0 2" | sudo tee -a /etc/fstab
+    echo "UUID=$CONTAINER_UUID $FM_CONTAINERS ext4 defaults,nofail 0 2" | sudo tee -a /etc/fstab
+    echo "UUID=$BACKUP_UUID $FM_BACKUPS ext4 defaults,nofail 0 2" | sudo tee -a /etc/fstab
+    touch $STATE/fstab
+  fi
+
+  sudo mount -a || { echo "Error mounting additional drives. Check /etc/fstab before rerunning fm_install.sh"; exit 1; }
+  sudo chown -R fmserver:fmsadmin $FM_DATA || { echo "Error setting permissions on additional directories $FM_DATA/*"; exit 1; }
+  sudo chown -R fmserver:fmsadmin $FM_BACKUPS || { echo "Error setting permissions on additional directory $FM_BACKUPS/"; exit 1; }
+  touch $STATE/additional-directories
+fi
+
+
+# The SA_MASTER.fmp12 database needs to be uploaded to the server and started to setup
+# some of the scheduled scripts on the server.
+# You can just upload a dummy .fmp12 files that has the required scripts of the same name.
+# The script schedules are setup, then later on, all the production data can be copied over
+# to the new server.
+
+# This scripts are setup later on when the admin api is turned on.
+# The copying is done here as if you copy the database files, then try to start them straight
+# away, filemaker doesn't like it. By copying them now, there will be a bit of time before
+# trying to start the databases, 
+
+if [ ! -f $STATE/copy-dummy-samaster ]; then
+  sudo cp $SCRIPT_LOCATION/files/SA_MASTER_DUMMY.fmp12 $FM_DATABASES/SA_MASTER.fmp12 || { echo "Error copying dummy database"; exit 1; }
+  sudo chmod 664 $FM_DATABASES/SA_MASTER.fmp12 || { echo "Error setting permissions on dummy database"; exit 1; }
+  sudo chown fmserver:fmsadmin $FM_DATABASES/SA_MASTER.fmp12  || { echo "Error setting ownership on dummy database"; exit 1; }
+  touch $STATE/copy-dummy-samaster
+fi
+
+## Need to enable the data api. Then rest of server config can be done via the admin api
+if [ ! -f $STATE/admin-api-enabled ]; then
+  fmsadmin enable fmdapi -u $FM_ADMIN_USER -p $FM_ADMIN_PASSWORD || { echo "Error enabling data api"; exit 1; }
+  fmsadmin start fmdapi -u $FM_ADMIN_USER -p $FM_ADMIN_PASSWORD || { echo "Error starting data api"; exit 1; }
+  touch $STATE/admin-api-enabled
+fi
+
+#This is the most basic request to tell the admin api is working. Not auth is required for this to work.
+resp=`curl -s https://$HOSTNAME/fmi/data/v2/productInfo | jq --raw-output '.messages[0].message' 2>/dev/null` 
+if [ "$resp" != 'OK' ]; then
+  echo "Can't connect to server: $HOSTNAME"
+  echo $resp
+  exit 9
+fi
+
+
+## This is where snapshot of server was taken for the purpose of restoring to a known
+# point and reruning some of the setup scripts
+
+
+
+
+API_URL="$HOSTNAME/fmi/admin/api/v2"
+
+#Base64 encode the username and password for the api
+AUTH=$(echo -n $FM_ADMIN_USER:$FM_ADMIN_PASSWORD | base64)
+
+if [ $OPTIONS == "token" ]; then
+ json=`curl -s https://$API_URL/user/auth \
+  -X POST \
+  -H "Authorization: Basic $AUTH" \
+  -H 'Content-Type: application/json'`
+
+  ok=`echo $json | jq --raw-output '.messages[0].text'`
+  if [ "$ok" != 'OK' ]; then
+    echo "Can't get authorisation token"
+    echo $json
+    exit 9
+  fi
+
+  #Get token from json. This token is used for the remainder of requests.
+  token=`echo $json | jq --raw-output '.response.token'` || { echo "Error parsing token json"; exit 1; }
+  echo "token: $token"
+  exit 9
+fi
+
+#token for testing
+token=eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzaWQiOiIxNmZhYmQ0Ni03Mjg5LTRiZDUtOGIwMy1mYzJmMjE3MWI1YTAiLCJpYXQiOjE3MzIyNjQ5ODN9.mXtwVnHBpklpqoN1trHQ5XMzAIAoKPMLMMsgnzpHt2Q
+
+#Check token works
+json=`curl -s https://$API_URL/server/metadata \
+ -H "Authorization: Bearer $token" \
+ -H "Content-Type: application/json"`
+jsonok "Token not working"
+
+echo "Token works. Lets continue"
+
+
+
+# echo "Server General Settings"
+if [ ! -f $STATE/server-general-settings ]; then
+  echo "Server General Settings"
+  echo "Increase cache from default of 512M to 1G"
+  echo "Set it so databases aren't automatically opened on server start"
+  END_POINT="server/config/general"
+  method="PATCH"
+  data='{ "cacheSize": 1024,
+ "openDatabasesOnStart": false }'
+
+  api_curl $method $data
+  jsonok "Couldn't set general database settings"
+  touch $STATE/server-general-settings
+fi
+
+# Enable parallel backups
+if [ "$PARALLEL_BACKUPS" == "Yes" ] && [ ! -f $STATE/parallel-backups ]; then
+  END_POINT="server/config/parallelbackup"
+  echo "Enable Parallel Backups"
+  method="PATCH"
+  data='{ "parallelBackupEnabled": true }'
+  api_curl $method $data
+  jsonok "Couldn't enable parallel backups"
+  touch $STATE/parallel-backups
+fi
+
+#
+#
+if [ ! -f $STATE/additional-folders-configured ]; then
+  echo "Setting up additional folders for databases and containers"
+  END_POINT="server/config/additionaldbfolder"
+  method="PATCH"
+  data=' { "UseOtherDatabaseRoot": true,
+   "DatabaseRootPath": "filelinux:/opt/FileMaker/Data/Databases/",
+   "UseDatabaseRoot1_RC": true,
+   "DatabaseRootPath1_RC": "filelinux:/opt/FileMaker/Data/Containers/",
+   "backupDatabaseRoot1_RC": true
+  }'
+  api_curl $method $data
+  jsonok "Couldn't set additional database/container directories"
+  touch $STATE/additional-folders-configured
+fi
+
+if [ ! -f $STATE/backup-path ]; then
+  echo "Setting up backup to use seperate backup drive"
+  END_POINT="server/backuppath"
+  method="PATCH"
+  data=' { "backupPath": "filelinux:/opt/FileMaker/Backups/" }'
+  api_curl $method $data
+  jsonok "Couldn't set backup location"
+
+  touch $STATE/backup-path
+fi
+
+
+#
+#
+if [ ! -f $STATE/enable-webdirect ]; then
+  echo enabling web direct
+  END_POINT="webdirect/config"
+  method="PATCH"
+  data=' { "enabled": true }'
+  api_curl $method $data
+  jsonok "Couldn't enable webdirect"
+  touch $STATE/enable-webdirect
+fi
+#
+#
+if [ ! -f $STATE/enable-wpe ]; then
+  echo enabling web publishing engine
+  END_POINT="wpe/config/1"
+  method="PATCH"
+  data=' { "enabled": true }'
+  api_curl $method $data
+  jsonok "Couldn't enable web publishing engine"
+  touch $STATE/enable-wpe
+fi
+
+#
+#
+if [ ! -f $STATE/enable-email ]; then
+  echo enabling email notifications
+  END_POINT="server/notifications/email/available"
+  method="PATCH"
+  data=' { "emailNotification": 1 }'
+  api_curl $method $data
+  jsonok "Couldn't enable email notifications"
+  touch $STATE/enable-email
+fi
+
+#
+#
+if [ ! -f $STATE/setup-email ]; then
+  echo enabling email notifications
+  END_POINT="server/notifications/email"
+  method="PATCH"
+  data=' { "emailSenderAddress": "'$EMAIL_SENDER'",
+    "emailReplyAddress": "'$EMAIL_REPLY'",
+    "emailRecipients": "'$EMAIL_RECIPIENTS'",
+    "smtpServerAddress": "'$SMTP_SERVER'",
+    "smtpServerPort": 587,
+    "smtpUsername": "'$SMTP_USER'",
+    "smtpPassword": "'$SMTP_PASSWORD'",
+    "smtpAuthType": 3,
+    "smtpSecurity": 4,
+    "notifyLevel": 1
+  }'
+  api_curl $method $data
+  jsonok "Couldn't configure email settings"
+  touch $STATE/setup-email
+fi
+
+
+# #List folder settings
+# echo "Server Folder Settings"
+# END_POINT="server/currentfoldersettings"
+# method="GET"
+# data="{}"
+# api_curl $method $data
+# jsonok "Couldn't get folder settings"
+# echo $json | jq .
+
+
+if [ $OPTIONS == "list" ]; then
+  END_POINT="schedules"
+  method="GET"
+  data="{}"
+  api_curl $method $data
+  jsonok "list schedules"
+  echo $json
+  exit 9
+fi
+
+#########################################################################
+##                            BACKUPS                                  ##
+#########################################################################
+## Setup all the backups that run in addition to the default daily backup.
+
+# Offsite backups.
+# One runs at midday, the other at 1am. The one at 1am does a verify. Each only keeps 1 generation.
+
+# Hourly
+# backup that runs every hour from 6:05 to 23:05 every day.
+# 40 generations are kept
+
+# Clone Only backup.
+# There take up bugger all space, so keep heaps of them as.. why not.
+
+if [ ! -f $STATE/configure-backups ]; then
+#offsite backups
+  END_POINT="schedules/backup"
+  method="POST"
+  data='{
+  "name": "offsite_day",
+  "backupType": {
+    "resourceType": "ALL_DB",
+    "backupTarget": "filelinux:/opt/FileMaker/Backups/",
+    "maxBackups": 1,
+    "clone": false,
+    "verify": false
+  },
+  "enabled": false,
+  "everyndaysType": {
+    "startTimeStamp": "2024-11-16T11:30:00",
+    "dailyDays": 1
+  }
+}'
+api_curl $method $data
+jsonok "Couldn't configure backup"
+  data='{
+  "name": "offsite_night",
+  "backupType": {
+    "resourceType": "ALL_DB",
+    "backupTarget": "filelinux:/opt/FileMaker/Backups/",
+    "maxBackups": 1,
+    "clone": false,
+    "verify": false
+  },
+  "enabled": false,
+  "everyndaysType": {
+    "startTimeStamp": "2024-11-16T01:00:00",
+    "dailyDays": 1
+  }
+}'
+api_curl $method $data
+jsonok "Couldn't configure backup"
+
+#Clone backup. These are very small, so can keep lots of generations.
+  data='{
+  "name": "clone",
+  "backupType": {
+    "resourceType": "ALL_DB",
+    "backupTarget": "filelinux:/opt/FileMaker/FileMaker Server/Data/ClonesOnly/",
+    "maxBackups": 60,
+    "clone": false,
+    "cloneOnly": true,
+    "verify": false
+  },
+  "enabled": false,
+  "everyndaysType": {
+    "startTimeStamp": "2024-11-16T05:00:00",
+    "dailyDays": 1
+  }
+}'
+api_curl $method $data
+jsonok "Couldn't configure backup"
+
+echo "hourly backups"
+  END_POINT="schedules/backup"
+  method="POST"
+  data='{
+  "name": "hourly",
+  "backupType": {
+    "resourceType": "ALL_DB",
+    "backupTarget": "filelinux:/opt/FileMaker/Backups/",
+    "maxBackups": 40,
+    "clone": false,
+    "verify": false
+  },
+  "enabled": false,
+  "everyndaysType": {
+    "startTimeStamp": "2024-11-16T06:05:00",
+    "dailyDays": 1,
+    "repeatTask": {
+      "repeatFrequency": 1,
+      "repeatInterval": "HOURS",
+      "endTime": "23:05:00"
+    }
+  }
+}'
+
+  api_curl $method $data
+  jsonok "Couldn't configure backup"
+
+  touch $STATE/configure-backups
+fi
+
+
+##############################
+##  Setup Script Schedules  ##
+##############################
+
+fmsadmin open -u $FM_ADMIN_USER -p $FM_ADMIN_PASSWORD
+
+if [ ! -f $STATE/configure-schedules ]; then
+  echo "setup scheduled scripts"
+  END_POINT="schedules/systemscript"
+  method="POST"
+  data='{
+    "name": "Garbage Collection",
+    "systemScriptType": {
+      "osScript": "filelinux:/opt/FileMaker/FileMaker Server/Data/Scripts/Sys_Default_RunGarbageCollection",
+      "osScriptParam": "",
+      "timeout": 0
+    },
+    "enabled": true,
+    "everyndaysType": {
+      "startTimeStamp": "2024-11-16T04:15:00",
+      "dailyDays": 1
+    }
+  }'
+  api_curl $method $data
+  jsonok "Couldn't setup garbage collection system script."
+
+  END_POINT="schedules/systemscript"
+  method="POST"
+  data='{
+    "name": "Purge Temp DB",
+    "systemScriptType": {
+      "osScript": "filelinux:/opt/FileMaker/FileMaker Server/Data/Scripts/Sys_Default_PurgeTempDB",
+      "osScriptParam": "",
+      "timeout": 0
+    },
+    "enabled": true,
+    "everyndaysType": {
+      "startTimeStamp": "2024-11-16T04:30:00",
+      "dailyDays": 1
+    }
+  }'
+  api_curl $method $data
+  jsonok "Couldn't setup Purge Temp DB system script"
+
+  END_POINT="schedules/filemakerscript"
+  method="POST"
+  data='{
+    "name": "Server Master 3 hourly",
+    "filemakerScriptType": {
+      "autoAbort": false,
+      "fmScriptName": "SERVER_MASTER",
+      "fmScriptAccount": "'$SCRIPT_USER'",
+      "fmScriptPassword": "'$SCRIPT_PASS'",
+      "resource": "file:SA_MASTER",
+      "timeout": 0
+    },
+    "enabled": false,
+    "everyndaysType": {
+      "startTimeStamp": "2024-11-16T06:00:00",
+      "dailyDays": 1,
+      "repeatTask": {
+        "repeatFrequency": 3,
+        "repeatInterval": "HOURS",
+        "endTime": "23:01:00"
+      }
+    }
+  }'
+  api_curl $method $data
+  jsonok "Couldn't setup SERVER_MASTER 3 hourly script"
+
+  touch $STATE/configure-schedules
+
+  END_POINT="schedules/filemakerscript"
+  method="POST"
+  data='{
+    "name": "Container Cleanup",
+    "filemakerScriptType": {
+      "autoAbort": false,
+      "fmScriptName": "Container_Cleanup",
+      "fmScriptAccount": "'$SCRIPT_USER'",
+      "fmScriptPassword": "'$SCRIPT_PASS'",
+      "resource": "file:SA_MASTER",
+      "timeout": 0
+    },
+    "enabled": false,
+    "everyndaysType": {
+      "startTimeStamp": "2024-11-16T05:00:00",
+      "dailyDays": 1
+    }
+  }'
+  api_curl $method $data
+  jsonok "Couldn't setup Container Cleanup script"
+
+  #now the scripts have been setup, the dummy SA_MASTER is no longer needed.
+  fmsadmin close SA_MASTER -u $FM_ADMIN_USER -p $FM_ADMIN_PASSWORD
+  fmsadmin remove SA_MASTER -u $FM_ADMIN_USER -p $FM_ADMIN_PASSWORD
+
+  touch $STATE/configure-schedules
+fi
+
+
+
+###############################################
+##  Setup External Authentication Schedules  ##
+###############################################
+if [ "$EXTERNAL_AUTH" == "Yes"  ] && [ ! -f $STATE/external-auth ]; then
+  END_POINT="extauth/dbsignin/externalserver"
+  method="PATCH"
+  data='{ "EnableExtServerSignin": true }'
+  api_curl $method $data
+  jsonok "Couldn't enable External Server Signin"
+
+  END_POINT="extauth/provider/microsoft"
+  method="PATCH"
+  data='{
+    "AzureID": "'$OAuthID'",
+    "AzureKey": "'$OAuthKey'",
+    "AzureDirectoryID": "'$OAuthDirectoryID'"
+  }'
+  api_curl $method $data
+  jsonok "Couldn't confgure Microsoft OAuth"
+
+  END_POINT="extauth/dbsignin/microsoft"
+  method="PATCH"
+  data='{ "EnableMSSignin": true }'
+  api_curl $method $data
+  jsonok "Couldn't confgure Microsoft DB Signin"
+
+  touch $STATE/external-auth
+fi
+
+
+## Setup some system scripts to run at startup or a timer.
+
+
+
+
+exit 99
+###########################################################
+##             Restore data from current server          ##
+###########################################################
+
+#Everything in filemaker should be owned by fmserver:fmsadmin
+
+## Database & Container files should be   664 rw-rw-r--
+## Database folders should be             775 rwxrwxr-x
+
+
+read -p "start rsync data from production."
+sudo rsync -tlvzh --progress --stats \
+ -e "ssh -i $PEM" \
+ ubuntu@fm.southernairlines.com.au:/opt/FileMaker/Data/Databases/*.fmp12 \
+ /opt/FileMaker/Data/Databases/
+
+read -p "start rsync contaienrs" 
+sudo rsync -rtlvzh --progress --stats \
+ -e "ssh -i $PEM" \
+ ubuntu@fm.southernairlines.com.au:/opt/FileMaker/Data/Containers/RC_Data_FMS/* \
+ /opt/FileMaker/Data/Containers/RC_Data_FMS/
+
+sudo chown -R fmserver:fmsadmin /opt/FileMaker/Data/
+
+#Set directories to 775   rwxrwxr-x
+#          files to 664   rw-rw-r--
+sudo find /opt/FileMaker/Data/ -type d -exec chmod 775 {} +
+sudo find /opt/FileMaker/Data/ -type f -exec chmod 664 {} +
+
+
+## TO DO
+
+# I just uploaded a zipped clone of SA_MASTER to the repository.
+# This needs to be unzipped, and loaded up as a database so the schedule can be setup.
+# Hopefully the database can be deleted without breaking the scheduled tasks??
+

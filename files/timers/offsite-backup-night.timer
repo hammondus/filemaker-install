@@ -1,0 +1,9 @@
+[Unit]
+Description=nightly offsite backup to office
+
+[Timer]
+OnCalendar=2:00
+Unit=offsite-backup-night.service
+
+[Install]
+WantedBy=timers.target

@@ -1,0 +1,50 @@
+#!/bin/bash
+
+# Functions used by fm_install.sh
+
+jsonok() {
+  ok=`echo $json | jq --raw-output '.messages[0].text'`
+  if [ "$ok" != 'OK' ]; then
+    echo $1
+    echo $json
+    exit 1
+  fi
+}
+
+api_curl() {
+json=`curl -s https://$API_URL/$END_POINT \
+ -X $method \
+ -H "Authorization: Bearer $token" \
+ -H "Content-Type: application/json" \
+ -d "$data"`
+}
+
+api_test_curl() {
+json=`echo -s https://$API_URL/$END_POINT \
+ -X $method \
+ -H "Authorization: Bearer $token" \
+ -H "Content-Type: application/json" \
+ -d "$data"`
+}
+
+logoff_rerun() {
+  echo "------------------------------------------"
+  echo "-                                        -"
+  echo "-  logoff and on again so that fmsadmin  -"
+  echo "-   without having to use sudo           -"
+  echo "-                                        -"
+  echo "-   rerun ~/fm_install.sh                -"
+  echo "------------------------------------------"
+  exit 1
+}
+
+reboot_rerun() {
+  echo "-------------------------------"
+  echo "-                             -"
+  echo "-      reboot server          -"
+  echo "-           then              -"
+  echo "-   rerun ~/fm_install.sh     -"
+  echo "-                             -"
+  echo "-------------------------------"
+  exit 1
+}

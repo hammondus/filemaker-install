@@ -1,0 +1,10 @@
+[Unit]
+Description=Filemaker SSL Cert timer
+Requires=fmSSLrefresh.service
+
+[Timer]
+OnCalendar=Sun 03:55:00
+Unit=fmSSLrefresh.service
+
+[Install]
+WantedBy=timers.target

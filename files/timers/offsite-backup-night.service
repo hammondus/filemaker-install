@@ -1,0 +1,10 @@
+[Unit]
+Description=nightly offsite backup to office
+
+[Service]
+Type=oneshot
+Nice=19
+IOSchedulingClass=idle
+CPUSchedulingPolicy=idle
+ExecStart=/home/ubuntu/offsite_backup.sh night
+User=ubuntu

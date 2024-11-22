@@ -1,0 +1,7 @@
+[Unit]
+Description=Refresh SSL Cert on Filemaker
+Requires=fmSSLrefresh.timer
+
+[Service]
+Type=oneshot
+ExecStart=/home/ubuntu/SSLrefresh/refreshFilemakerSSL.sh
