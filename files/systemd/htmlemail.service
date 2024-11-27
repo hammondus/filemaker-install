@@ -5,9 +5,9 @@ After=network.target
 [Service]
 Type=simple
 ExecStart=/home/ubuntu/gomail
-User=ubuntu
 Restart=on-failure
 RestartSec=60
+User=ubuntu
 
 [Install]
 WantedBy=multi-user.target

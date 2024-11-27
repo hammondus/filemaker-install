@@ -4,7 +4,8 @@ After=default.target
 
 [Service]
 Type=simple
-ExecStart=/home/ubuntu/SSLrefresh/ServerStart.sh
+ExecStart=INSTALLED_SCRIPTS/ServerStart.sh
+User=ubuntu
 
 [Install]
 WantedBy=default.target

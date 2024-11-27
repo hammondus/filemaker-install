@@ -4,4 +4,5 @@ Requires=fmSSLrefresh.timer
 
 [Service]
 Type=oneshot
-ExecStart=/home/ubuntu/SSLrefresh/refreshFilemakerSSL.sh
+ExecStart=INSTALLED_SCRIPTS/refreshFilemakerSSL.sh
+User=ubuntu
