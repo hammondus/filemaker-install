@@ -5,16 +5,41 @@ set -o pipefail  #returns any error in the pipe, not just last command
 
 OPTIONS=$1
 
+if [ "$OPTIONS" != "token" ] && [ "$OPTIONS" != "dev" ] && [ "$OPTIONS" != "run" ] && [ "$OPTIONS" != "restore" ]; then
+  echo "script must be run with 1 option. They are:"
+  echo
+  echo "token - Get an admin api token, display it and exit. The admin api only gives out so many tokens"
+  echo "dev - once you have a token, manually update the token variable so the script can be rerun many times"
+  echo "run - run the script as it would be run in production"
+  echo "restore - once the server has been installed and is up and running ok, restore data from the old servr"
+exit 1
+fi
+
+# Before running this script
+# Make sure the below variables are set
+# On existing production server
+# - Disable all scheduled tasks
+# - close all databases.
+# - clone this repo to the new server and run it.
+
+
 #
 #
 # Required
 # ALL The following variables are required
-# These variables won't work as is. They need to be set correctly
-# These variable contain sensitive info, so the real versions of these are kept
+# These are split into 3 groups.
+# 1. Those that have to be changed to suit your environment for this to work
+# 2. Those that are recommended to be changed.
+# 3. Those that cannot be changed.
+# 4. Variables that just set options for some
+
+# Many of these variable contain sensitive info, so the real versions of these are kept
 # in a private directory which git ignores.
 
-### Start of Variables that are required to be overriden for this script to work at all.
-
+#
+#
+### 1. Variables that are required to be overriden for this script to work at all.
+#
 DOWNLOAD=https://downloads.claris.com/filemaker.zip
 HOSTNAME=fm.example.com
 CERTBOT_EMAIL=me@you.com
@@ -26,10 +51,11 @@ SMTP_SERVER="smtp.server.com"
 SMTP_USER="mysmtpuser"
 SMTP_PASSWORD="mysmtppassword"
 
+RESTORE_SSH=user@fm.backupserver.com
 BACKUP_SSH=user@fm.backupserver.com
 
-# Server scripts from one of the databases are scheduled.
-# This is the user and password of that database.
+# Server scripts from one of the databases are scheduled to run automatically on the server.
+# This is the user and password of that database so those scripts can be setup.
 SCRIPT_USER="dog"
 SCRIPT_PASS="cat"
 
@@ -38,22 +64,29 @@ OAuthID="a69asdfa2c"
 OAuthKey="kU~0sadf"
 OAuthDirectoryID="dsdafedf"
 
-###
-### End of Variables that HAVE to be changed.
-###
+# Rsync Offsite Backup Settings
+RSYNC_DAY=user@backup1.server.com
+RSYNC_NIGHT=user@backup2.server.com
+
+#Be careful with the drive settings. The script doesn't check that what you have put in is correct.
+#Only put in devices that are completely blank. Devices listed below will be partitioned and formatted.
+DRIVE_DATABASES=/dev/nvme2n1
+DRIVE_CONTAINERS=/dev/nvme1n1
+DRIVE_BACKUPS=/dev/nvme3n1
 
 #
-# These variables will work as is, but should be set to appropraite values.
+#
+### 2. Variables that should be changed to suit, but script will work as is, except for the "secret" stuff below. These need to be set..
+#
+#
 TIMEZONE=Australia/Melbourne
 FM_ADMIN_USER=dog
 FM_ADMIN_PASSWORD=pass
 FM_ADMIN_PIN=1234
 
-#
-# These are what works for me. Check they are suitable.
 # If you change $HOME_LOCATION or $SCRIPT_LOCATION, those variables are used in other scripts.
 
-#Databases, containers and backups are stored in these location which are then mounted on a seperate drive each.
+#Databases, containers and backups are stored in these location which are then mounted on seperate drives
 FM_DATA=/opt/FileMaker/Data
 FM_DATABASES=$FM_DATA/Databases
 FM_CONTAINERS=$FM_DATA/Containers
@@ -66,25 +99,18 @@ STATE=$SCRIPT_LOCATION/state
 ASSISTED_FILE=$SCRIPT_LOCATION/fminstall/AssInst.txt
 INSTALLED_SCRIPTS=$HOME_LOCATION/filemaker-scripts     # Various scripts used after the install are put here.
 
-
-#The .pem file for the production server is required to be in the same directly as this script
-PEM=$SCRIPT_LOCATION/secrets/fm.pem
-
-
 #
+#
+### SECRETS
+#
+# Many of the above variables need to be overriden with the proper values. hostname, usernames and passwords
+# for obvious reasons, they aren't included in a public repo, so they are kept as a seperate file which overrides many
+# of the above variables.
+SECRETS=$SCRIPT_LOCATION/secrets/filemaker-install 
+
 # Override variables with private data
-# 
-. $SCRIPT_LOCATION/secrets/variables    # variables that override many of the above variables.
-. $SCRIPT_LOCATION/secrets/fm_auth      # Filemaker server username and password used by various setup and post install scripts.
-
-# This shouldn't be changed for this script to work
-WEBROOTPATH="/opt/FileMaker/FileMaker Server/NginxServer/htdocs/httpsRoot/"
-
-#Be careful with the drive settings. The script doesn't check that what you have put in is correct.
-#Only put in devices that are completely blank. Devices listed below will be partitioned and formatted.
-DRIVE_DATABASES=/dev/nvme2n1
-DRIVE_CONTAINERS=/dev/nvme1n1
-DRIVE_BACKUPS=/dev/nvme3n1
+. $SECRETS/variables    # variables that override many of the above variables.
+. $SECRETS/fm_auth      # Filemaker server username and password used by various setup and post install scripts.
 
 # Server Settings
 PARALLEL_BACKUPS=Yes   # Enable parallel backups
@@ -96,6 +122,16 @@ EXTERNAL_AUTH=Yes
 GLANCES=Yes
 NCDU=Yes
 IOTOP=Yes
+
+#
+#
+### 3. Variables that should not be changed.
+#
+WEBROOTPATH="/opt/FileMaker/FileMaker Server/NginxServer/htdocs/httpsRoot/"
+
+########################
+### END OF VARIABLES ###
+########################
 
 # load in functions
 . $SCRIPT_LOCATION/functions
@@ -127,7 +163,7 @@ fi
 if [ ! -f ~/fm_install.sh ]; then
   ln -s $SCRIPT_LOCATION/fm_install.sh $HOME_LOCATION/fm_install.sh
   echo "----------------------------------------------------------------------------------------"
-  echo "If this install asks you to reboot and rerun the script, it is copied to ~/fm_install.sh"
+  echo "When this install asks you to reboot and rerun the script, it is copied to ~/fm_install.sh"
   read -p "Press return to continue "
 fi
 
@@ -261,7 +297,7 @@ if [ ! -f $STATE/certbot-installed ]; then
 fi
 
 if [ ! -f $STATE/certbot-certificate ]; then
-  # sudo service ufw stop
+  echo "install Certbot certificate"
   sudo ufw allow http
   sudo certbot certonly --webroot \
     -w "$WEBROOTPATH" \
@@ -269,8 +305,19 @@ if [ ! -f $STATE/certbot-certificate ]; then
     --agree-tos --non-interactive \
     -m $CERTBOT_EMAIL \
     || { echo "Error getting Certificate with Certbot."; sudo service ufw start; exit 1; }
-  # sudo service ufw start
   sudo ufw deny http
+
+  # Setup certbot triggers to enable / disable http when it attempts to renew the certificate
+  sudo cp $SCRIPT_LOCATION/files/scripts/certbot-pre-openhttp /etc/letsencrypt/renewal-hooks/pre/openhttp
+  sudo cp $SCRIPT_LOCATION/files/scripts/certbot-post-closehttp /etc/letsencrypt/renewal-hooks/post/closehttp
+  
+  sed "s#DIR=xxx#DIR=$INSTALLED_SCRIPTS#" \
+    $SCRIPT_LOCATION/files/scripts/certbot-deploy-GotNewSSL | sudo tee /etc/letsencrypt/renewal-hooks/deploy/GotNewSSL > /dev/null
+
+  sudo chmod +x /etc/letsencrypt/renewal-hooks/pre/openhttp
+  sudo chmod +x /etc/letsencrypt/renewal-hooks/post/closehttp
+  sudo chmod +x /etc/letsencrypt/renewal-hooks/deploy/GotNewSSL
+
   touch $STATE/certbot-certificate
 
   logoff_rerun   # need to logoff and on again now otherwise fmsadmin doesn't work without sudo
@@ -287,7 +334,11 @@ if [ ! -f $STATE/certbot-certificate-loaded-filemaker ]; then
   sudo service fmshelper restart
 
   touch $STATE/certbot-certificate-loaded-filemaker
+  sudo service fmshelper restart
+  logoff_rerun   # need to logoff and on again now otherwise fmsadmin doesn't work without sudo
 fi
+
+
 ## At this point, the server should be up and running with an SSL cert.
 
 #Create additional directories for Databases, Containers & Backups and attached drives
@@ -364,6 +415,9 @@ API_URL="$HOSTNAME/fmi/admin/api/v2"
 #Base64 encode the username and password for the api
 AUTH=$(echo -n $FM_ADMIN_USER:$FM_ADMIN_PASSWORD | base64)
 
+# Setting token is just for testing and development
+# You can't get and admin api token too often. The server stops handing them out
+
 if [ $OPTIONS == "token" ]; then
  json=`curl -s https://$API_URL/user/auth \
   -X POST \
@@ -383,8 +437,29 @@ if [ $OPTIONS == "token" ]; then
   exit 9
 fi
 
-#token for testing
-token=eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzaWQiOiJiNTE0YzBhZC01YzY4LTRjMjktODVjOC0yMjNkOTVmM2JiMmUiLCJpYXQiOjE3MzIzNTY0NTJ9.0BKUFtU0i5LLYLQrScL_bLBp3GerS6eFxhWkFQEKkY8
+if [ $OPTIONS == "dev" ]; then
+  #token for testing
+  token=eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzaWQiOiJiNTE0YzBhZC01YzY4LTRjMjktODVjOC0yMjNkOTVmM2JiMmUiLCJpYXQiOjE3MzIzNTY0NTJ9.0BKUFtU0i5LLYLQrScL_bLBp3GerS6eFxhWkFQEKkY8
+  token=eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzaWQiOiIyZGQ1Y2EwNy1mNTA0LTQ4OGYtOGYyMy03NjMxYjQwZTA0OTEiLCJpYXQiOjE3MzI5Mjk2OTV9.sY0Kt4-MBOC6UcovkiGN97iasbMa6ZjTRvJdRTpmI7o
+fi
+
+if [ $OPTIONS == "run" ]; then
+ json=`curl -s https://$API_URL/user/auth \
+  -X POST \
+  -H "Authorization: Basic $AUTH" \
+  -H 'Content-Type: application/json'`
+
+  ok=`echo $json | jq --raw-output '.messages[0].text'`
+  if [ "$ok" != 'OK' ]; then
+    echo "Can't get authorisation token"
+    echo $json
+    exit 9
+  fi
+
+  #Get token from json. This token is used for the remainder of requests.
+  token=`echo $json | jq --raw-output '.response.token'` || { echo "Error parsing token json"; exit 1; }
+fi
+
 
 #Check token works
 json=`curl -s https://$API_URL/server/metadata \
@@ -719,8 +794,8 @@ if [ ! -f $STATE/configure-schedules ]; then
   jsonok "Couldn't setup Container Cleanup script"
 
   #now the scripts have been setup, the dummy SA_MASTER is no longer needed.
-  fmsadmin close SA_MASTER -u $FM_ADMIN_USER -p $FM_ADMIN_PASSWORD
-  fmsadmin remove SA_MASTER -u $FM_ADMIN_USER -p $FM_ADMIN_PASSWORD
+  fmsadmin close SA_MASTER -y -u $FM_ADMIN_USER -p $FM_ADMIN_PASSWORD
+  fmsadmin remove SA_MASTER -y -u $FM_ADMIN_USER -p $FM_ADMIN_PASSWORD
 
   touch $STATE/configure-schedules
 fi
@@ -730,6 +805,7 @@ fi
 ##  Setup External Authentication Schedules  ##
 ###############################################
 if [ "$EXTERNAL_AUTH" == "Yes"  ] && [ ! -f $STATE/external-auth ]; then
+  echo "Setting up External Auth"
   END_POINT="extauth/dbsignin/externalserver"
   method="PATCH"
   data='{ "EnableExtServerSignin": true }'
@@ -756,56 +832,47 @@ if [ "$EXTERNAL_AUTH" == "Yes"  ] && [ ! -f $STATE/external-auth ]; then
 fi
 
 
-# Check the ssh certs allow logon to backup server
-if [ ! -d $STATE/ssh_logon ]; then
-  cp $SCRIPT_LOCATION/secrets/fm_auth $INSTALLED_SCRIPTS
-  cp $SCRIPT_LOCATION/secrets/id_rsa $HOME_LOCATION/.ssh
-  chmod 600 $HOME_LOCATION/.ssh/id_rsa
+##############################
+##  Setup Systemd scripts   ##
+##############################
+if [ ! -f $STATE/systemd-scripts ];then
+  echo
+  echo "configuring systemd scripts"
+  sed "s#DIR=xxx#DIR=$INSTALLED_SCRIPTS#;s#DOMAIN=xxx#DOMAIN=$HOSTNAME#;s#FMAUTH=xxx#FMAUTH=$INSTALLED_SCRIPTS/fm_auth#" \
+   $SCRIPT_LOCATION/files/scripts/refreshFilemakerSSL.sh > $INSTALLED_SCRIPTS/refreshFilemakerSSL.sh
 
-  echo "Will logon to the backup server to check it works before continuing on with installation"
-  echo "If it does logon, CTRL-D to exit back and continue installation"
-  read -p "Press enter to attempt logon to backup server:"
+  sed "s#DIR=xxx#DIR=$INSTALLED_SCRIPTS#;s#FMAUTH=xxx#$INSTALLED_SCRIPTS/fm_auth#" \
+   $SCRIPT_LOCATION/files/scripts/ServerStart.sh > $INSTALLED_SCRIPTS/ServerStart.sh
 
-  ssh -o "StrictHostKeyChecking=accept-new" $BACKUP_SSH || { echo "Error SSHing into backup server"; exit 1; }
+  sed "s#FM_BACKUPS#$FM_BACKUPS#;s#FMAUTH=xxx#FMAUTH=$INSTALLED_SCRIPTS/fm_auth#" \
+   $SCRIPT_LOCATION/files/scripts/offsite_backup.sh > $INSTALLED_SCRIPTS/offsite_backup.sh
 
-  touch $STATE/ssh_logon
-  echo "Logon to backup server successful. Continuing on with install"
+
+
+  cp $SECRETS/fm_auth $INSTALLED_SCRIPTS
+  chmod +x $INSTALLED_SCRIPTS/*.sh
+  chmod 600 $INSTALLED_SCRIPTS/fm_auth
+
+  # Copy over all the systemd services and timers that will be setup
+  sudo cp $SCRIPT_LOCATION/files/systemd/*.timer /etc/systemd/system
+  sudo cp $SCRIPT_LOCATION/files/systemd/htmlemail.service /etc/systemd/system
+
+  SERVICE=fmSSLrefresh.service; sed_systemd
+  SERVICE=offsite-backup-night.service; sed_systemd
+  SERVICE=startup.service; sed_systemd
+
+  # Enable the systemd services.
+  sudo systemctl enable startup
+  sudo systemctl enable --now offsite-backup-night.timer
+  sudo systemctl enable --now fmSSLrefresh.timer
+  sudo systemctl enable --now htmlemail
+
+  touch $STATE/systemd-scripts
 fi
 
-
-# sed -i -e "s/DIR=xxx/DIR=$INSTALLED_SCRIPTS/" -e "s/DOMAIN=xxx/DOMAIN=$HOSTNAME/" -e "s/FMAUTH=xxx/FMAUTH=$INSTALLED_SCRIPTS/fm_auth/" \
-# sed -e "s#DIR=xxx#DIR=$INSTALLED_SCRIPTS#" -e "s#DOMAIN=xxx#DOMAIN=hostcunt#" -e "s#FMAUTH=xxx#FMAUTH=installedcunt#" \
-sed "s#DIR=xxx#DIR=$INSTALLED_SCRIPTS#;s#DOMAIN=xxx#DOMAIN=$HOSTNAME#;s#FMAUTH=xxx#FMAUTH=$INSTALLED_SCRIPTS/fm_auth#" \
- $SCRIPT_LOCATION/files/scripts/refreshFilemakerSSL.sh > $INSTALLED_SCRIPTS/refreshFilemakerSSL.sh
-
-sed "s#DIR=xxx#DIR=$INSTALLED_SCRIPTS#;s#FMAUTH=xxx#$INSTALLED_SCRIPTS/fm_auth#" \
- $SCRIPT_LOCATION/files/scripts/ServerStart.sh > $INSTALLED_SCRIPTS/ServerStart.sh
-
-sed "s#DIR=xxx#DIR=$INSTALLED_SCRIPTS#;s#FMAUTH=xxx#FMAUTH=$INSTALLED_SCRIPTS/fm_auth#" \
- $SCRIPT_LOCATION/files/scripts/offsite_backup.sh > $INSTALLED_SCRIPTS/offsite_backup.sh
-
-chmod +x $INSTALLED_SCRIPTS/*.sh
-
-# Copy over all the systemd services and timers that will be setup
-sudo cp $SCRIPT_LOCATION/files/systemd/*.timer /etc/systemd/system
-sudo cp $SCRIPT_LOCATION/files/systemd/htmlemail.service /etc/systemd/system
-
-
-SERVICE=fmSSLrefresh.service; sed_systemd
-SERVICE=offsite-backup-day.service; sed_systemd
-SERVICE=offsite-backup-night.service; sed_systemd
-SERVICE=startup.service; sed_systemd
-
-
-# Enable the systemd services.
-sudo systemctl enable startup
-sudo systemctl enable offsite-backup-night.timer
-sudo systemctl enable offsite-backup-day.timer
-sudo systemctl enable fmSSLrefresh.timer
-
- exit 99
-## Setup some system scripts to run at startup or a timer.
-
+echo "Installation complete"
+echo "To restore data, run this script with the 'restore' parameter"
+echo "Logon to the filemaker admin console and enable the backups and scheduled scripts"
 
 ###########################################################
 ##             Restore data from current server          ##
@@ -816,26 +883,45 @@ sudo systemctl enable fmSSLrefresh.timer
 ## Database & Container files should be   664 rw-rw-r--
 ## Database folders should be             775 rwxrwxr-x
 
+if [ "$OPTIONS" == "restore" ]; then
+  echo
+  echo
+  echo "Will logon to the backup server to check it works before continuing on with installation"
+  echo "If it does logon, CTRL-D to exit back and continue installation"
+  read -p "Press enter to attempt logon to backup server:"
 
-read -p "start rsync data from production."
-sudo rsync -tlvzh --progress --stats \
- -e "ssh -i $PEM" \
- ubuntu@fm.southernairlines.com.au:/opt/FileMaker/Data/Databases/*.fmp12 \
- /opt/FileMaker/Data/Databases/
+  ssh -i "$SECRETS/fm.pem" -o "StrictHostKeyChecking=accept-new" $RESTORE_SSH || { echo "Error SSHing into server to restore data"; exit 1; }
+  echo "Logon to backup server successful. Continuing on with install"
+  
+  cp $SECRETS/fm_auth $INSTALLED_SCRIPTS || { echo "Error copying fm_auth"; exit 1; }
+  cp -f $SECRETS/id_rsa $HOME_LOCATION/.ssh || { echo "Error copying id_rsa"; exit 1; }
+  chmod 400 $HOME_LOCATION/.ssh/id_rsa  || { echo "Error chmodding id_rsa to 400"; exit 1; }
 
-read -p "start rsync contaienrs" 
-sudo rsync -rtlvzh --progress --stats \
- -e "ssh -i $PEM" \
- ubuntu@fm.southernairlines.com.au:/opt/FileMaker/Data/Containers/RC_Data_FMS/* \
- /opt/FileMaker/Data/Containers/RC_Data_FMS/
 
-sudo chown -R fmserver:fmsadmin /opt/FileMaker/Data/
+  echo
+  echo "restore databases"
+  sleep 1
+  sudo rsync -ptlvzh --progress --stats --chmod=F664,D775 \
+   -e "ssh -i $SECRETS/fm.pem" \
+   $RESTORE_SSH:/opt/FileMaker/Data/Databases/*.fmp12 \
+   /opt/FileMaker/Data/Databases/
 
-#Set directories to 775   rwxrwxr-x
-#          files to 664   rw-rw-r--
-sudo find /opt/FileMaker/Data/ -type d -exec chmod 775 {} +
-sudo find /opt/FileMaker/Data/ -type f -exec chmod 664 {} +
+  echo
+  echo "restore containers"
+  sleep 1
+  sudo rsync -rptlvzh --progress --stats --chmod=F664,D775 \
+   -e "ssh -i $SECRETS/fm.pem" \
+   $RESTORE_SSH:/opt/FileMaker/Data/Containers/RC_Data_FMS/* \
+   /opt/FileMaker/Data/Containers/RC_Data_FMS/
 
+  sudo chown -R fmserver:fmsadmin /opt/FileMaker/Data/
+
+  #sudo find /opt/FileMaker/Data/ -type d -exec chmod 775 {} +
+  #sudo find /opt/FileMaker/Data/ -type f -exec chmod 664 {} +
+
+fi
+
+exit 99
 
 ## TO DO
 
@@ -852,4 +938,5 @@ sed -i -e "s/DIR=xxx/DIR=$INSTALLED_SCRIPTS/" -e "s/DOMAIN=xxx/DOMAIN=$HOSTNAME/
  $SCRIPT_LOCATION/files/scripts/refreshFilemaker.SSL.sh > $INSTALLED_SCRIPTS/refreshFilemakerSSL.sh
 
 
+# gomail
 

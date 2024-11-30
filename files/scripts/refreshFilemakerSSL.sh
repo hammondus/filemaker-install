@@ -32,14 +32,14 @@ fi
 
 echo 'We have a new SSL Cert. Import to filemaker and restart'
 
-  # The certs in the live directory are just links to the certs.
-  # fmsadmin can't handle using links to files, so we need to find where the actual certs are.
-  # For this, fmsadmin requires sudo as the letsencrypt directories are only accessable
-  # by the root user.
-  CERTFILEPATH=$(sudo realpath "/etc/letsencrypt/live/$HOSTNAME/fullchain.pem")
-  PRIVKEYPATH=$(sudo realpath "/etc/letsencrypt/live/$HOSTNAME/privkey.pem")
-  sudo fmsadmin certificate import $CERTFILEPATH --keyfile $PRIVKEYPATH \
-    -u $FM_ADMIN_USER -p $FM_ADMIN_PASSWORD -y || { echo "Filemaker unable to import certificate"; exit 1; }
+# The certs in the live directory are just links to the certs.
+# fmsadmin can't handle using links to files, so we need to find where the actual certs are.
+# For this, fmsadmin requires sudo as the letsencrypt directories are only accessable
+# by the root user.
+CERTFILEPATH=$(sudo realpath "/etc/letsencrypt/live/$DOMAIN/fullchain.pem")
+PRIVKEYPATH=$(sudo realpath "/etc/letsencrypt/live/$DOMAIN/privkey.pem")
+sudo fmsadmin certificate import $CERTFILEPATH --keyfile $PRIVKEYPATH \
+  -u $FM_ADMIN_USER -p $FM_ADMIN_PASSWORD -y || { echo "Filemaker unable to import certificate"; exit 1; }
 
 echo 'cert files imported in to Filemaker'
 

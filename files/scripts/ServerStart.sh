@@ -1,8 +1,5 @@
 #!/bin/bash
 
-#location
-#/home/ubuntu/SSLrefresh/
-
 #Runs automatically on server restart via startup.service 
 
 # Filemaker has been set to not automatically open databases after a server restart.
