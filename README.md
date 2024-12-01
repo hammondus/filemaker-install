@@ -76,3 +76,18 @@ The actual rsync command is commented out so it can be checked manually it's run
 - set the nighly offsite backup to do a database verify.
 - GotNewSSL in letsencrypt wasn't created by sed correctly.  shouldn't have "DIR=" in it.
 - A cleanup script that deletes all the install files that aren't needed after the install.
+- offsite_backup.sh in filemaker-scripts wasn't setup correctly with sed and the directory being CD'd into is wrong. No in the offsite directory anymore
+```bash
+#!/bin/bash
+echo "night offsite backup"
+cd /opt/FileMaker/Backups/offsite_night*
+
+#Check if we are in the right spot
+if [ ! -d "Databases" ]; then
+  echo "Not in the right spot. ABORT ABORT"
+  exit 1
+fi
+
+echo "We are good. Backup to Server in Sydney"
+rsync -rtlpzh --del --stats -e "ssh -o StrictHostKeyChecking=accept-new" . user@backupserver.com:~/backup/night/
+```
