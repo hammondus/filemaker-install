@@ -1,6 +1,6 @@
 #!/bin/bash
 
-# Functions used by fm_install.sh
+# Functions used by install
 
 jsonok() {
   ok=`echo $json | jq --raw-output '.messages[0].text'`
@@ -33,13 +33,13 @@ sed_systemd() {
 }
 
 logoff_rerun() {
-  echo "------------------------------------------"
-  echo "-                                        -"
-  echo "-  logoff and on again so that fmsadmin  -"
-  echo "-   without having to use sudo           -"
-  echo "-                                        -"
-  echo "-   rerun ~/fm_install.sh                -"
-  echo "------------------------------------------"
+  echo "------------------------------"
+  echo "-                            -"
+  echo "-  logoff and on again       -"
+  echo "-          then              -"
+  echo "-                            -"
+  echo "-   rerun ~/fm_install.sh    -"
+  echo "------------------------------"
   exit 1
 }
 
@@ -52,4 +52,17 @@ reboot_rerun() {
   echo "-                             -"
   echo "-------------------------------"
   exit 1
+}
+
+upgrade_filemaker() {
+  echo "upgrade filemaker"
+  echo "........."
+}
+
+# The purpose of this is to execute commands to setup filemaker, but checking to see if filemaker
+# is being installed either natively or in a docker container, and adjusting the command to suit.
+
+executeCMD() {
+  echo "FMDOCKER: $FM_DOCKER ---- $1"
+  #"#docker exec ${FM_NAME}-primary bash -c "FM_ASSISTED_INSTALL=/install/AssInst apt install /install/$DEB -y" || { echo 'Error installing Filemaker'; exit 1; }  
 }
