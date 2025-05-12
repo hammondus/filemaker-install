@@ -3,8 +3,25 @@ set -u  # treat unset variables as an error
 set -o pipefail  #returns any error in the pipe, not just last command
 #set -x    # uncomment for debugging.
 
-OPTIONS=$1
+# This script will install filemaker, either natively or as a docker container. It will optionally install nginx proxy manager.
+# If Filemaker is to be run natively, it currently requires Ubuntu 22.04 and you can only have one copy of filemaker running
+#
+# If Filemaker is to be run as a docker container, this script will work on either Debian or Ubuntu.
+# and multiple versions of filemaker can be installed.
+#
+# The default options will do the following:
+# Install nginx proxy manager, which will look after the SSL certificate.
+# By having nginx look after it, no need to reboot filemaker whenever the SSL cert is renewed.
+# Filemaker is installed as a docker container.
+# In this case, no need to expose any ports as nginx will talk to filemakaer over a docker network.
+#
+# If filemaker is installed as a docker container without nginx, ports 443 and 5003 are exposed.
 
+# This script has been tested on Debian 12 and Ubuntu 24.04 on both AMD64 and ARM64 hardware for docker installs
+# and on Ubuntu 22.04 when installing Filemaker natively.
+
+#OPTIONS=$1
+OPTIONS="run"
 if [ "$OPTIONS" != "token" ] && [ "$OPTIONS" != "dev" ] && [ "$OPTIONS" != "run" ] && [ "$OPTIONS" != "restore" ]; then
   echo "script must be run with 1 option. They are:"
   echo
@@ -15,15 +32,45 @@ if [ "$OPTIONS" != "token" ] && [ "$OPTIONS" != "dev" ] && [ "$OPTIONS" != "run"
 exit 1
 fi
 
-# Before running this script
-# Make sure the below variables are set
+#Work out what flavour and version of Linux this is.
+if [ -f /etc/os-release ]; then
+  . /etc/os-release
+  #This will set various variables. This script will use:
+  # "ID"  Should be either "debian" or "ubuntu"
+  # "VERSION_ID"  Will be 11 or 12 or similar for Debian. "22.04" "24.04" etc for Ubuntu
+  # "PRETTY_NAME" Will be something like "Ubuntu 22.04.5 LTS"
+
+   #Use variables with more meaningful name for later in the script
+  LINUX_DISTRO=$ID
+  LINUX_VERSION=$VERSION_ID
+else
+  echo "Unable to work out what Linux is running."
+  exit 9
+fi
+
+case `uname -m` in
+  x86_64) ARCH="amd64" ;;
+  aarch64) ARCH="arm64";;
+  *) ARCH="unknown" ;;
+esac
+
+if [ "$ARCH" == "unknown" ]; then
+  echo "Architecture can't be determined. This script can only run on amd64 or arm64 platforms"
+  exit 9
+fi
+
+echo "Detected this system as $PRETTY_NAME running on $ARCH hardware"
+
+
+# If this is to copy data from old server to new, before running this script
+# - Make sure the below variables are set
+
 # On existing production server
 # - Disable all scheduled tasks
 # - close all databases.
 # - clone this repo to the new server and run it.
 
 
-#
 #
 # Required
 # ALL The following variables are required
@@ -38,66 +85,150 @@ fi
 
 #
 #
-### 1. Variables that are required to be overriden for this script to work at all.
+### 1. Variables that should be carefully checked or changed for this script to work correctly.
 #
-DOWNLOAD=https://downloads.claris.com/filemaker.zip
-HOSTNAME=fm.example.com
-CERTBOT_EMAIL=me@you.com
-#Server email notifications
-EMAIL_SENDER="email@server.com"
-EMAIL_REPLY="noreply@server.com"
-EMAIL_RECIPIENTS="me@you.com, you@me.com"
-SMTP_SERVER="smtp.server.com"
-SMTP_USER="mysmtpuser"
-SMTP_PASSWORD="mysmtppassword"
+SCRIPT_LOCATION=~/filemaker_install
 
-RESTORE_SSH=user@fm.backupserver.com
-BACKUP_SSH=user@fm.backupserver.com
 
-# Server scripts from one of the databases are scheduled to run automatically on the server.
-# This is the user and password of that database so those scripts can be setup.
-SCRIPT_USER="dog"
-SCRIPT_PASS="cat"
+# These ones likely do not need to be changed.
+STATE=$SCRIPT_LOCATION/state
+DOWNLOAD_LOCATION=$SCRIPT_LOCATION/downloads
+INSTALL=$SCRIPT_LOCATION/install
 
-# Microsoft OAuth settings.
-OAuthID="a69asdfa2c"
-OAuthKey="kU~0sadf"
-OAuthDirectoryID="dsdafedf"
+#Host setup
+SWAP_ENABLED=false
+SWAP_SIZE=4G
+SWAPPINESS=10
 
-# Rsync Offsite Backup Settings
-RSYNC_DAY=user@backup1.server.com
-RSYNC_NIGHT=user@backup2.server.com
+#Select which Filemaker to build. You can only install multiple versions on the one server if installed as docker containers.
+#Only enable one of these per run of this script.
+FMS=FMS1    # Latest production version
+#FMS=FMS2   # Latest ETS Beta build
 
-#Be careful with the drive settings. The script doesn't check that what you have put in is correct.
-#Only put in devices that are completely blank. Devices listed below will be partitioned and formatted.
-DRIVE_DATABASES=/dev/nvme2n1
-DRIVE_CONTAINERS=/dev/nvme1n1
-DRIVE_BACKUPS=/dev/nvme3n1
+
+#Default. May be overriden later
+FM_DOCKER=true    # Docker will get installed regardless. This just determines if Filemaker will be installed as a docker container.
+NGINX_PROXY=true  # Install the nginx proxy manager as a docker container.
+CERTBOT=false
+
+#FMS1 settings. This is the latest production
+if [ "$FMS" == "FMS1" ]; then
+  #This is the setup for Southern's production filemaker server.
+  FMS_VERSION=21.1.4.400
+  FM_NAME=fms$FMS_VERSION
+  FM_INSTALL=$INSTALL/$FM_NAME
+  ASSINST=$SCRIPT_LOCATION/install/$FM_NAME/assInst
+  #UBUNTU="22.04" #If Filemaker is NOT to be run in a docker container, it will only run on a specific version of Ubuntu
+  DOWNLOAD_LINK=https://s3.ap-southeast-4.amazonaws.com/downloads/filemaker/fms_${FMS_VERSION}_Ubuntu22_$ARCH.zip      
+        
+  DOWNLOAD_FILE=fms_${FMS_VERSION}_Ubuntu22_$ARCH.zip
+  DEB=filemaker-server-${FMS_VERSION}-$ARCH.deb
+
+  #FM Server email notifications
+  EMAIL_NOTIFICATIONS=true
+  EMAIL_SENDER="fm@hammond.zone"
+  EMAIL_REPLY="noreply@hammond.zone"
+  EMAIL_RECIPIENTS="craig@blueskyflying.com.au"
+  SMTP_SERVER="aws.smtp.com"
+  SMTP_USER="AADDS4Z57RN"
+  SMTP_PASSWORD="BBaljbVnzLd/qqSsmpY3waUIADz8"
+
+  # Filemaker Server scripts from one of the databases are scheduled to run automatically on the server.
+  # The automatic installation of these scripts can only happen when a database with those scripts included is
+  # installed on the server. The below database is a cutdown version of the production database that just
+  # has dummy scripts with the same name as in production.
+  # Once the scripts have been setup on the server to run, this cutdown database can be replaced with 
+  # the production one and the schedule Filemaker scripts will still run.
+
+  # This is the user and password of that database so those scripts can be setup.
+  FM_AUTOSCRIPT_INSTALL=true
+  FM_AUTOSCRIPT_DATABASE_NAME="SA_MASTER_CLONE"
+  FM_AUTOSCRIPT_USER="admin"
+  FM_AUTOSCRIPT_PASS="Spoon?1234"
+
+  # Microsoft OAuth settings.
+  EXTERNAL_AUTH=true
+  OAuthID="a69asdfa2c"
+  OAuthKey="kU~0sadf"
+  OAuthDirectoryID="dsdafedf"
+
+  FM_ADMIN_USER=admin
+  FM_ADMIN_PASSWORD=cocko
+  FM_ADMIN_PIN=1234
+
+  PARALLEL_BACKUPS=true
+
+  # Setup info based on if it's to be run natively or in a docker container
+  if [ "$FM_DOCKER" == "true" ]; then
+    CPUS=3
+    MEMORY="16G"
+
+    FM_DATA=~/docker/filemaker/$FM_NAME/Data
+    FM_LOGS=~/docker/filemaker/$FM_NAME/Logs
+    FM_DATABASES=$FM_DATA/Databases
+  
+    FM_CONTAINERS=$FM_DATA/Containers
+    FM_BACKUPS=$FM_DATA/Backups
+
+    #If you change the below variables, consider if the same variables after the "else" statement need changing
+    HOME_LOCATION=/opt/FileMaker
+    #SCRIPT_LOCATION=$HOME_LOCATION/filemaker-install   # this assumes you did the git clone from the home directory.
+    DRIVE_DATABASES=/dev/nvme1n1
+    DRIVE_CONTAINERS=/dev/nvme2n1
+    DRIVE_BACKUPS=/dev/nvme3n1
+
+  else
+    # Running FM natively.
+    UBUNTU="22.04"
+    FM_DATA=/opt/FileMaker
+    FM_DATABASES=$FM_DATA/Data/Databases
+    FM_CONTAINERS=$FM_DATA/Data/Containers
+    FM_BACKUPS=$FM_DATA/Backups
+
+    #If you change the below variables, consider if the same variables before the above "else" statement need changing
+    HOME_LOCATION=/home/ubuntu
+    # SCRIPT_LOCATION=$HOME_LOCATION/filemaker-install   # this assumes you did the git clone from the home directory.
+    ASSISTED_FILE=$SCRIPT_LOCATION/fminstall/AssInst.txt
+    INSTALLED_SCRIPTS=$HOME_LOCATION/filemaker-scripts     # Various scripts used after the install are put here.
+
+    ### Be Careful. These drives will be partitioned and formatted. ###
+    #DRIVE_DATABASES=/dev/nvme2n1
+    #DRIVE_CONTAINERS=/dev/nvme1n1
+    #DRIVE_BACKUPS=/dev/nvme3n1
+  fi
+
+  DATA=$FM_DATA/$NAME
+fi #FMS1
+###########################################################################################
+
+if [ "$FMS" == "FMS2" ]; then
+  #FMS2 settings. This is the latest ETS Beta build
+  NAME=ets22-0-1-32
+
+  UBUNTU="24.04" #If Filemaker is NOT to be run in a docker container, it will only run on a specific version of Ubuntu
+
+  if [ "$ARCH" == "arm64" ]; then
+    DOWNLOAD_LINK=https://s3.ap-southeast-4.amazonaws.com/downloads/filemaker/fms_32_ubuntu24arm_ets_v4gl5.zip
+    DOWNLOAD_FILE=fms_32_ubuntu24arm_ets_v4gl5.zip
+  else
+  # ETS AMD64. Beta
+    DOWNLOAD_LINK=https://s3.ap-southeast-4.amazonaws.com/downloads/filemaker/fms_32_ubuntu24_ets_1nuvu.zip
+    DOWNLOAD_FILE=fms_32_ubuntu24_ets_1nuvu.zip
+  fi
+  DEB=filemaker-server-22.0.1.32-$ARCH.deb
+
+  ## more shit to go there.
+fi #FMS2
+
 
 #
 #
 ### 2. Variables that should be changed to suit, but script will work as is, except for the "secret" stuff below. These need to be set..
 #
 #
+
 TIMEZONE=Australia/Melbourne
-FM_ADMIN_USER=dog
-FM_ADMIN_PASSWORD=pass
-FM_ADMIN_PIN=1234
-
-# If you change $HOME_LOCATION or $SCRIPT_LOCATION, those variables are used in other scripts.
-
-#Databases, containers and backups are stored in these location which are then mounted on seperate drives
-FM_DATA=/opt/FileMaker/Data
-FM_DATABASES=$FM_DATA/Databases
-FM_CONTAINERS=$FM_DATA/Containers
-FM_BACKUPS=/opt/FileMaker/Backups
-
-
-HOME_LOCATION=/home/ubuntu
-SCRIPT_LOCATION=$HOME_LOCATION/filemaker-install   # this assumes you did the git clone from the home directory.
-STATE=$SCRIPT_LOCATION/state
-ASSISTED_FILE=$SCRIPT_LOCATION/fminstall/AssInst.txt
-INSTALLED_SCRIPTS=$HOME_LOCATION/filemaker-scripts     # Various scripts used after the install are put here.
+HOSTNAME=cocko.hammond.zone
 
 #
 #
@@ -106,78 +237,151 @@ INSTALLED_SCRIPTS=$HOME_LOCATION/filemaker-scripts     # Various scripts used af
 # Many of the above variables need to be overriden with the proper values. hostname, usernames and passwords
 # for obvious reasons, they aren't included in a public repo, so they are kept as a seperate file which overrides many
 # of the above variables.
-SECRETS=$SCRIPT_LOCATION/secrets/filemaker-install 
+#SECRETS=$SCRIPT_LOCATION/secrets/filemaker-install 
 
 # Override variables with private data
-. $SECRETS/variables    # variables that override many of the above variables.
-. $SECRETS/fm_auth      # Filemaker server username and password used by various setup and post install scripts.
+#. $SECRETS/variables    # variables that override many of the above variables.
+#. $SECRETS/fm_auth      # Filemaker server username and password used by various setup and post install scripts.
 
 # Server Settings
-PARALLEL_BACKUPS=Yes   # Enable parallel backups
-EXTERNAL_AUTH=Yes
 
 
 # Optional software to install
 # Install optional programs I find handy. Change this to No if not needed
-GLANCES=Yes
-NCDU=Yes
-IOTOP=Yes
+# This script will install these only on the host. Not in the docker containers (if any)
+GLANCES=true
+NCDU=true
 
 #
 #
 ### 3. Variables that should not be changed.
 #
-WEBROOTPATH="/opt/FileMaker/FileMaker Server/NginxServer/htdocs/httpsRoot/"
+#WEBROOTPATH="/opt/FileMaker/FileMaker Server/NginxServer/htdocs/httpsRoot/"
 
 ########################
 ### END OF VARIABLES ###
 ########################
 
-# load in functions
+# load in functions. Not sure if will work once script is linked to user home directory.
 . $SCRIPT_LOCATION/functions
 
-#######################
-
-# Create directory where post install filemaker scripts will live
-if [ ! -d $INSTALLED_SCRIPTS ]; then
-  mkdir $INSTALLED_SCRIPTS || { echo "Couldn't create filemaker scripts directory: $INSTALLED_SCRIPTS"; exit 1; }
-fi
-
-
-
-
-#Check we are on the correct version of Ubuntu
-if [ -f /etc/os-release ]; then
-  . /etc/os-release
-  VER=$VERSION_ID
-  if [ "$VER" != "22.04" ]; then
-    echo "Wrong version of Ubuntu. Must be 22.04"
-    echo "You are running" $VER 
-    exit 1
-  else
-    echo "Good. You are Ubuntu" $VER
-  fi
-fi
-
-# Link this script to the home directory so it can easily be run it after login
-if [ ! -f ~/fm_install.sh ]; then
-  ln -s $SCRIPT_LOCATION/fm_install.sh $HOME_LOCATION/fm_install.sh
-  echo "----------------------------------------------------------------------------------------"
-  echo "When this install asks you to reboot and rerun the script, it is copied to ~/fm_install.sh"
-  read -p "Press return to continue "
-fi
-
-
-# The state directory is used so that this script can keep track of where it is up to between reboots
+# This script needs to be run multiple times.
+# The state directory is used so that this script can keep track of where it is up to between these runs
 if [ ! -d $STATE ]; then
   echo "creating state directory"
   mkdir $STATE || { echo "Couldn't create state directory"; exit 1; }
 fi
 
+if [ "$SWAP_ENABLED" == "true" ] && [ ! -f $STATE/swap ]; then
+  sudo fallocate -l $SWAP_SIZE /swapfile && \
+  sudo chmod 600 /swapfile && \
+  sudo mkswap /swapfile && \
+  sudo swapon /swapfile && \
+  sudo swapon --show && \
+  echo "/swapfile none swap sw 0 0" | sudo tee -a /etc/fstab && \
+  echo "vm.swappiness=$SWAPPINESS" | sudo tee -a /etc/sysctl.conf || { echo "unable to configure swap"; exit 1; }
+  touch $STATE/swap
+fi
+
+
+# Link this script to the home directory so it can easily be run it after login
+if [ ! -f ~/fm_install ]; then
+  ln -s $SCRIPT_LOCATION/fm_install ~/fm_install
+  echo
+  echo "----------------------------------------------------------------------------------------"
+  echo "When this install script asks you to reboot and rerun the script, it is copied to ~/fm_install.sh"
+  read -p "Press return to continue "
+fi
+
+#Setup bash the way I like it.
+if [ ! -f $STATE/bash-setup ]; then 
+  echo "#Added by filemaker install script" >> ~/.bashrc
+  echo "alias l='ls'" >> ~/.bashrc
+  echo "alias ll='ls -l'" >> ~/.bashrc
+  echo "alias lll='ls -la'" >> ~/.bashrc
+  echo "alias update='sudo apt update && sudo apt upgrade -y'" >> ~/.bashrc
+  if [[ "$GLANCES" == "true" ]]; then
+    echo "alias g='glances --theme-white -1'" >> ~/.bashrc
+  fi
+  touch $STATE/bash-setup
+fi
+
+type unzip &> /dev/null || sudo apt install unzip -y || { echo "unable to install unzip"; exit 1; }
+type jq &> /dev/null || sudo apt install jq -y || { echo "unable to install jq"; exit 1; }
+#using "type parted", even with sudo doesn't work on debian.
+sudo which parted &> /dev/null || sudo apt install parted -y || { echo "unable to install parted"; exit 1; }
+
+if [[ "$GLANCES" == "true" ]] && ! type glances &> /dev/null; then
+  sudo apt install glances -y
+fi
+if [[ "$NCDU" == "true" ]] && ! type ncdu &> /dev/null; then
+  sudo apt install ncdu -y
+fi
+
+#
+#
+# Do various checks around if Filemaker.
+# If installing FM natively and it's already installed, it will be an upgrade
+
+echo "checking if fm is installed if docker isn't to be used"
+if [[ "$FM_DOCKER" == "false" ]] && type fmsadmin &> /dev/null; then
+  printf "\nYou are attempting to install Filemaker Natively, but it's already installed.\n"
+  echo "If you run the installation file, it will upgrade the existing Filemaker"
+  read -p "Type in   upgrade     to upgrade the existing filemaker. Anything else will abort this script: " input
+  if [ "$input" != "upgrade" ]; then
+    exit
+  fi
+  upgrade_filemaker
+  exit
+fi
+
+#If it not to be run in docker, check we are on the correct version of Ubuntu
+if [[ "$FM_DOCKER" == "false" ]] && { [[ "$LINUX_DISTRO" != "ubuntu" || "$LINUX_VERSION" != "$UBUNTU" ]]; }; then
+  echo "To run Filemaker natively, it must be installed on Ubuntu $UBUNTU"
+  echo "This appears to be $LINUX_DISTRO $LINUX_VERSION"
+  echo "Either set the variable 'FM_DOCKER' = true, or run this on the correct version of Ubuntu"
+  exit 9
+fi
+
+# Create directory where post install filemaker scripts will live  (only applicable as is, if not going in a container)
+#if [ ! -d $INSTALLED_SCRIPTS ]; then
+#  mkdir $INSTALLED_SCRIPTS || { echo "Couldn't create filemaker scripts directory: $INSTALLED_SCRIPTS"; exit 1; }
+#fi
+
+if ! type docker &> /dev/null; then 
+  echo "Installing Docker"
+  # Add Docker's official GPG key:
+  sudo apt-get update
+  sudo apt-get install ca-certificates curl
+  sudo install -m 0755 -d /etc/apt/keyrings
+  sudo curl -fsSL https://download.docker.com/linux/$LINUX_DISTRO/gpg -o /etc/apt/keyrings/docker.asc
+  sudo chmod a+r /etc/apt/keyrings/docker.asc
+
+  # Add the repository to Apt sources:
+  if [ "$LINUX_DISTRO" == "ubuntu" ]; then
+    echo \
+      "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/ubuntu \
+      $(. /etc/os-release && echo "${UBUNTU_CODENAME:-$VERSION_CODENAME}") stable" | \
+      sudo tee /etc/apt/sources.list.d/docker.list > /dev/null
+  else
+    echo \
+      "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/debian \
+      $(. /etc/os-release && echo "$VERSION_CODENAME") stable" | \
+      sudo tee /etc/apt/sources.list.d/docker.list > /dev/null
+  fi
+  sudo apt-get update
+  sudo apt-get install docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin -y \
+    ||  { echo "Docker installation failed"; exit 1; }
+  sudo usermod -aG docker $USER
+
+  sudo docker ps ||  { echo "docker ps didn't work. Something went wrong with the Docker installation"; exit 1; }
+  echo 'logoff and on again. docker ps should now work without needing sudo'
+  logoff_rerun
+fi
+
 
 if [ ! -f $STATE/timezone-set ]; then 
   sudo timedatectl set-timezone $TIMEZONE || { echo "Error setting timezone"; exit 1; }
-  timedatectl
   touch $STATE/timezone-set
 fi
 
@@ -188,161 +392,111 @@ fi
 
 #Make sure the system is up to date and reboot if necessary
 if [ ! -f $STATE/apt-upgrade ]; then
-  echo 'apt update/upgrade not done. doing it now'
   sudo apt update || { echo "Error running apt update"; exit 1; }
   sudo DEBIAN_FRONTEND=noninteractive apt upgrade -y || { echo "Error running apt upgrade"; exit 1; }
   touch $STATE/apt-upgrade
   if [ -f /var/run/reboot-required ]; then
-    echo "Reboot is required. Reboot then rerun this script"
+    echo "Reboot is required. Reboot then rerun this script   ~./fm_install"
     reboot_rerun
   fi
 fi
-
-
-#Install unzip if it's not installed. Not optional
-#The download from claris needs to be unzipped.
-#jq is used to process JSON in the admin api
-
-type unzip > /dev/null 2>&1 || sudo apt install unzip -y
-type jq > /dev/null 2>&1 || sudo apt install jq -y
-
-#Install optional software if they have been selected
-if [ "$GLANCES" == "Yes" ]; then
-  type glances > /dev/null 2>&1 || sudo apt install glances -y || { echo "Error installing Glances"; exit 9; }
-fi
-if [ "$NCDU" == "Yes" ]; then
-  type ncdu > /dev/null 2>&1 || sudo apt install ncdu -y || { echo "Error installing NCDU"; exit 9; }
-fi
-if [ "$IOTOP" == "Yes" ]; then
-  type iotop > /dev/null 2>&1 || sudo apt install iotop-c -y || { echo "Error installing iotop-c"; exit 9; }
-fi
-
 
 # Partition, format and attached the additional drives.
 #
 
 if [ ! -f $STATE/drive-setup ]; then
-  echo "Label the drives"
-  sudo parted -s $DRIVE_DATABASES mklabel gpt || { echo "error with mklabel on database drive"; exit 1; }
-  sudo parted -s $DRIVE_CONTAINERS mklabel gpt || { echo "error with mklabel on containers drive"; exit 1; }
-  sudo parted -s $DRIVE_BACKUPS mklabel gpt || { echo "error with mklabel on backup drive"; exit 1; }
 
-  echo "Partition the drives"
-  sudo parted -s $DRIVE_DATABASES mkpart Databases 0% 100% || { echo "error with mkpark on database drive"; exit 1; }
-  sudo parted -s $DRIVE_CONTAINERS mkpart Containers 0% 100% || { echo "error with mkpart on containers drive"; exit 1; }
-  sudo parted -s $DRIVE_BACKUPS mkpart Backups 0% 100% || { echo "error with mkpart on backup drive"; exit 1; }
-  
-  echo "Format the drives"
-  sudo mkfs.ext4 -m 0 ${DRIVE_DATABASES}p1 || { echo "error with mkfs on database drive"; exit 1; }
-  sudo mkfs.ext4 -m 0 ${DRIVE_CONTAINERS}p1 || { echo "error with mkfs on containers drive"; exit 1; }
-  sudo mkfs.ext4 -m 0 ${DRIVE_BACKUPS}p1 || { echo "error with mkfs on backup drive"; exit 1; }
+  if [[ "$DRIVE_DATABASES" != "false" ]]; then
+    sudo parted -s $DRIVE_DATABASES mklabel gpt || { echo "error with mklabel on database drive"; exit 1; }
+    sudo parted -s $DRIVE_DATABASES mkpart Databases 0% 100% || { echo "error with mkpark on database drive"; exit 1; }
+    sleep 1  ## sometimes, if the mkfs runs too quickly after the partition, it fails
+    sudo mkfs.ext4 -m 0 ${DRIVE_DATABASES}p1 || { echo "error with mkfs on database drive"; exit 1; }  
+  fi
 
+  if [[ "$DRIVE_CONTAINERS" != "false" ]]; then
+    sudo parted -s $DRIVE_CONTAINERS mklabel gpt || { echo "error with mklabel on containers drive"; exit 1; }
+    sudo parted -s $DRIVE_CONTAINERS mkpart Containers 0% 100% || { echo "error with mkpart on containers drive"; exit 1; }
+    sleep 1
+    sudo mkfs.ext4 -m 0 ${DRIVE_CONTAINERS}p1 || { echo "error with mkfs on containers drive"; exit 1; }
+  fi
+
+  if [[ "$DRIVE_BACKUPS" != "false" ]]; then
+    sudo parted -s $DRIVE_BACKUPS mklabel gpt || { echo "error with mklabel on backup drive"; exit 1; }
+    sudo parted -s $DRIVE_BACKUPS mkpart Backups 0% 100% || { echo "error with mkpart on backup drive"; exit 1; }
+    sleep 1
+    sudo mkfs.ext4 -m 0 ${DRIVE_BACKUPS}p1 || { echo "error with mkfs on backup drive"; exit 1; }
+  fi
   touch $STATE/drive-setup
 fi
 
-
 #Download filemaker
-if [ ! -f $STATE/filemaker-downloaded ]; then
-  rm -rf $SCRIPT_LOCATION/fmdownload
-  if mkdir $SCRIPT_LOCATION/fmdownload; then
-    cd $SCRIPT_LOCATION/fmdownload
-    if wget $DOWNLOAD; then
-      unzip ./fms*
-    else
-      echo "Error downloading filemaker."
-      exit 1
-    fi
-    touch $STATE/filemaker-downloaded
-  else
-    echo "Error creating Filemaker download directory at $SCRIPT_LOCATION/fmdownload"
-    exit 1
-  fi
+mkdir -p $DOWNLOAD_LOCATION $SCRIPT_LOCATION/install || { echo "Error creating download/install directories"; exit 9; }
+
+#Download file doesn't exist, so get it.
+if [ ! -f $DOWNLOAD_LOCATION/$DOWNLOAD_FILE ]; then
+   wget $DOWNLOAD_LINK -P $DOWNLOAD_LOCATION  || { echo "Downloading Filemaker failed"; exit 9; }
 fi
 
-#Copy install file
-# The only thing we want from the claris .zip file is the *.deb installer.
-if [ ! -f $STATE/filemaker-install-file ]; then
-  mkdir $SCRIPT_LOCATION/fminstall
-  cp $SCRIPT_LOCATION/fmdownload/filemaker-server*.deb $SCRIPT_LOCATION/fminstall || { echo "Error copying .deb file to fminstall directory"; exit 1; }
-  touch $STATE/filemaker-install-file
+#unzip install files if they don't exist
+if [ ! -f $INSTALL/$FM_NAME/$DEB ]; then
+  unzip -u $DOWNLOAD_LOCATION/$DOWNLOAD_FILE -d $INSTALL/$FM_NAME || { echo "unzipping of FMS install file failed"; exit 9; }
 fi
 
 
 #Install filemaker
 if [ ! -f $STATE/filemaker-installed ]; then
-  cd $SCRIPT_LOCATION/fminstall
+
+# for dev, delete existing containers
+  docker stop $FM_NAME-primary
+  docker rm $FM_NAME-primary
+
+
   # Create the assisted install file.
-  echo "[Assisted Install]" > $ASSISTED_FILE
-  echo "License Accepted=1" >> $ASSISTED_FILE
-  echo "Deployment Options=0" >> $ASSISTED_FILE
-  echo "Admin Console User=$FM_ADMIN_USER" >> $ASSISTED_FILE
-  echo "Admin Console Password=$FM_ADMIN_PASSWORD" >> $ASSISTED_FILE
-  echo "Admin Console PIN=$FM_ADMIN_PIN" >> $ASSISTED_FILE
-  echo "Filter Databases=0" >> $ASSISTED_FILE
-  echo "Remove Sample Database=1" >> $ASSISTED_FILE
-  echo "Use HTTPS Tunneling=1" >> $ASSISTED_FILE
-  echo "Swap File Size=4G" >> $ASSISTED_FILE
-  echo "Swappiness=10" >> $ASSISTED_FILE
+  cd $INSTALL/$FM_NAME || { echo "Unable to cd into filemaker installation directory"; exit 9; }
+  echo "[Assisted Install]" > AssInst
+  echo "License Accepted=1" >> AssInst
+  echo "Deployment Options=0" >> AssInst
+  echo "Admin Console User=$FM_ADMIN_USER" >> AssInst
+  echo "Admin Console Password=$FM_ADMIN_PASSWORD" >> AssInst
+  echo "Admin Console PIN=$FM_ADMIN_PIN" >> AssInst
+  echo "Filter Databases=0" >> AssInst
+  echo "Remove Sample Database=1" >> AssInst
+  echo "Use HTTPS Tunneling=1" >> AssInst
 
   echo "Install Filemaker Server"
-  sudo FM_ASSISTED_INSTALL=$ASSISTED_FILE apt install ./filemaker-server*.deb -y || { echo "Error installing Filemaker"; exit 1; }
+
+  set -x
+
+  # Create the prep container just containing Ubuntu
+  if [[ "$FM_DOCKER" == "true" ]]; then
+    docker build -f $SCRIPT_LOCATION/Dockerfile.$FM_NAME -t fms:prep${FM_NAME} . || { echo "FMS prep build failed"; exit 9; }
+
+    # Run the prep container, then install Filemaker into it
+    docker run --detach \
+     --hostname ${FM_NAME}-primary \
+     --name ${FM_NAME}-primary \
+     --privileged \
+     --volume $INSTALL/$FM_NAME:/install \
+     --volume $FM_DATA:"/opt/FileMaker/FileMaker Server/Data" \
+     --volume $FM_LOGS:"/opt/FileMaker/FileMaker Server/Logs" \
+     fms:prep${FM_NAME} || { echo "run failed"; exit 9; }
+     sleep 1
+     # Thius nameserver change comes straight from Claris's docker script
+     docker exec ${FM_NAME}-primary bash -c "echo 'nameserver 8.8.8.8' | tee /etc/resolv.conf > /dev/null"
+  fi
+
+  if [ "$FM_DOCKER" == "true" ]; then
+    docker exec ${FM_NAME}-primary bash -c "FM_ASSISTED_INSTALL=/install/AssInst apt install /install/$DEB -y" || { echo 'Error installing Filemaker'; exit 1; }
+  else
+   sudo FM_ASSISTED_INSTALL=$FM_INSTALL/AssInst apt install $FM_INSTALL/$DEB -y || { echo 'Error installing Filemaker'; exit 1; }
+
+  fi
   touch $STATE/filemaker-installed
 fi
 
-if [ ! -f $STATE/certbot-installed ]; then
-  echo "Install Certbot"
-  sudo snap install --classic certbot || { echo "Error installing Certbot."; exit 1; }
-  sudo ln -s /snap/bin/certbot /usr/bin/certbot
-  touch $STATE/certbot-installed
-fi
-
-if [ ! -f $STATE/certbot-certificate ]; then
-  echo "install Certbot certificate"
-  sudo ufw allow http
-  sudo certbot certonly --webroot \
-    -w "$WEBROOTPATH" \
-    -d $HOSTNAME \
-    --agree-tos --non-interactive \
-    -m $CERTBOT_EMAIL \
-    || { echo "Error getting Certificate with Certbot."; sudo service ufw start; exit 1; }
-  sudo ufw deny http
-
-  # Setup certbot triggers to enable / disable http when it attempts to renew the certificate
-  sudo cp $SCRIPT_LOCATION/files/scripts/certbot-pre-openhttp /etc/letsencrypt/renewal-hooks/pre/openhttp
-  sudo cp $SCRIPT_LOCATION/files/scripts/certbot-post-closehttp /etc/letsencrypt/renewal-hooks/post/closehttp
-  
-  sed "s#DIR=xxx#DIR=$INSTALLED_SCRIPTS#" \
-    $SCRIPT_LOCATION/files/scripts/certbot-deploy-GotNewSSL | sudo tee /etc/letsencrypt/renewal-hooks/deploy/GotNewSSL > /dev/null
-
-  sudo chmod +x /etc/letsencrypt/renewal-hooks/pre/openhttp
-  sudo chmod +x /etc/letsencrypt/renewal-hooks/post/closehttp
-  sudo chmod +x /etc/letsencrypt/renewal-hooks/deploy/GotNewSSL
-
-  touch $STATE/certbot-certificate
-
-  logoff_rerun   # need to logoff and on again now otherwise fmsadmin doesn't work without sudo
-fi
-
-if [ ! -f $STATE/certbot-certificate-loaded-filemaker ]; then
-  echo "Importing Certificates to filemaker:"
-  # The certs in the live directory are just links to the certs.
-  # fmsadmin can't handle using links to files, so we need to find where the actual certs are.
-  CERTFILEPATH=$(sudo realpath "/etc/letsencrypt/live/$HOSTNAME/fullchain.pem")
-  PRIVKEYPATH=$(sudo realpath "/etc/letsencrypt/live/$HOSTNAME/privkey.pem")
-  sudo fmsadmin certificate import $CERTFILEPATH --keyfile $PRIVKEYPATH \
-    -u $FM_ADMIN_USER -p $FM_ADMIN_PASSWORD -y || { echo "Filemaker unable to import certificate"; exit 1; }
-  sudo service fmshelper restart
-
-  touch $STATE/certbot-certificate-loaded-filemaker
-  sudo service fmshelper restart
-  logoff_rerun   # need to logoff and on again now otherwise fmsadmin doesn't work without sudo
-fi
-
-
-## At this point, the server should be up and running with an SSL cert.
 
 #Create additional directories for Databases, Containers & Backups and attached drives
-if [ ! -f $STATE/additional-directories ]; then
+if [ ! -f $STATE/mount-drives ]; then
   sudo mkdir -p $FM_DATABASES $FM_CONTAINERS $FM_BACKUPS || { echo "Unable to create Data / Backup directories"; exit 1; }
 
   DATABASE_UUID=$(lsblk -n -o UUID ${DRIVE_DATABASES}p1)
@@ -366,10 +520,23 @@ if [ ! -f $STATE/additional-directories ]; then
   fi
 
   sudo mount -a || { echo "Error mounting additional drives. Check /etc/fstab before rerunning fm_install.sh"; exit 1; }
-  sudo chown -R fmserver:fmsadmin $FM_DATA || { echo "Error setting permissions on additional directories $FM_DATA/*"; exit 1; }
-  sudo chown -R fmserver:fmsadmin $FM_BACKUPS || { echo "Error setting permissions on additional directory $FM_BACKUPS/"; exit 1; }
-  touch $STATE/additional-directories
+  sudo systemctl daemon-reload
+
+  #sudo chown -R fmserver:fmsadmin $FM_DATA || { echo "Error setting permissions on additional directories $FM_DATA/*"; exit 1; }
+  #sudo chown -R fmserver:fmsadmin $FM_BACKUPS || { echo "Error setting permissions on additional directory $FM_BACKUPS/"; exit 1; }
+  touch $STATE/mount-drives
 fi
+
+
+
+#####
+#####
+##### UP TO HERE
+##### Latest change was playing with the $FM_DATA volume an how it maps to the internal filemaker data volume
+##### Not yet tested.
+
+echo cocko
+exit 99
 
 
 # The SA_MASTER.fmp12 database needs to be uploaded to the server and started to setup
@@ -562,7 +729,7 @@ fi
 
 #
 #
-if [ ! -f $STATE/setup-email ]; then
+if [[ ! -f $STATE/setup-email && "$EMAIL_NOTIFICATIONS" == "true" ]]; then
   echo enabling email notifications
   END_POINT="server/notifications/email"
   method="PATCH"
@@ -804,7 +971,7 @@ fi
 ###############################################
 ##  Setup External Authentication Schedules  ##
 ###############################################
-if [ "$EXTERNAL_AUTH" == "Yes"  ] && [ ! -f $STATE/external-auth ]; then
+if [[ "$EXTERNAL_AUTH" == "True"  && ! -f $STATE/external-auth ]]; then
   echo "Setting up External Auth"
   END_POINT="extauth/dbsignin/externalserver"
   method="PATCH"
@@ -940,3 +1107,61 @@ sed -i -e "s/DIR=xxx/DIR=$INSTALLED_SCRIPTS/" -e "s/DOMAIN=xxx/DOMAIN=$HOSTNAME/
 
 # gomail
 
+
+
+
+
+exit 0
+#Certbot stuff that isn't used at the moment.
+if [ "$CERTBOT" == "true" ]; then
+  if [ ! -f $STATE/certbot-installed ]; then
+    sudo snap install --classic certbot || { echo "Error installing Certbot."; exit 1; }
+    sudo ln -s /snap/bin/certbot /usr/bin/certbot
+    touch $STATE/certbot-installed
+  fi
+
+  if [ ! -f $STATE/certbot-certificate ]; then
+    echo "install Certbot certificate"
+    sudo ufw allow http
+    sudo certbot certonly --webroot \
+      -w "$WEBROOTPATH" \
+      -d $HOSTNAME \
+      --agree-tos --non-interactive \
+      -m $CERTBOT_EMAIL \
+      || { echo "Error getting Certificate with Certbot."; sudo service ufw start; exit 1; }
+    sudo ufw deny http
+
+    # Setup certbot triggers to enable / disable http when it attempts to renew the certificate
+    sudo cp $SCRIPT_LOCATION/files/scripts/certbot-pre-openhttp /etc/letsencrypt/renewal-hooks/pre/openhttp
+    sudo cp $SCRIPT_LOCATION/files/scripts/certbot-post-closehttp /etc/letsencrypt/renewal-hooks/post/closehttp
+  
+    sed "s#DIR=xxx#DIR=$INSTALLED_SCRIPTS#" \
+      $SCRIPT_LOCATION/files/scripts/certbot-deploy-GotNewSSL | sudo tee /etc/letsencrypt/renewal-hooks/deploy/GotNewSSL > /dev/null
+
+    sudo chmod +x /etc/letsencrypt/renewal-hooks/pre/openhttp
+    sudo chmod +x /etc/letsencrypt/renewal-hooks/post/closehttp
+    sudo chmod +x /etc/letsencrypt/renewal-hooks/deploy/GotNewSSL
+
+    touch $STATE/certbot-certificate
+
+    logoff_rerun   # need to logoff and on again now otherwise fmsadmin doesn't work without sudo
+  fi
+
+  if [ ! -f $STATE/certbot-certificate-loaded-filemaker ]; then
+    echo "Importing Certificates to filemaker:"
+    # The certs in the live directory are just links to the certs.
+    # fmsadmin can't handle using links to files, so we need to find where the actual certs are.
+    CERTFILEPATH=$(sudo realpath "/etc/letsencrypt/live/$HOSTNAME/fullchain.pem")
+    PRIVKEYPATH=$(sudo realpath "/etc/letsencrypt/live/$HOSTNAME/privkey.pem")
+    sudo fmsadmin certificate import $CERTFILEPATH --keyfile $PRIVKEYPATH \
+      -u $FM_ADMIN_USER -p $FM_ADMIN_PASSWORD -y || { echo "Filemaker unable to import certificate"; exit 1; }
+    sudo service fmshelper restart
+  
+    touch $STATE/certbot-certificate-loaded-filemaker
+    sudo service fmshelper restart
+    logoff_rerun   # need to logoff and on again now otherwise fmsadmin doesn't work without sudo
+  fi
+fi  # End of all certbot installation
+
+
+## At this point, the server should be up and running with an SSL cert.
