@@ -1,0 +1,92 @@
+#!/bin/bash
+
+# Functions used by install
+
+jsonok() {
+  ok=`echo $json | jq --raw-output '.messages[0].text'`
+  if [ "$ok" != 'OK' ]; then
+    echo $1
+    echo $json
+    exit 1
+  fi
+}
+
+api_curl() {
+json=`executeCMD "curl -ks https://$API_URL/$END_POINT \
+ -X $method \
+ -H 'Authorization: Bearer $token' \
+ -H 'Content-Type: application/json' \
+ -d '$data'" "curl failed"`
+}
+
+# api_curl() {
+# json=`curl -s https://$API_URL/$END_POINT \
+#  -X $method \
+#  -H "Authorization: Bearer $token" \
+#  -H "Content-Type: application/json" \
+#  -d "$data"`
+# }
+
+
+api_test_curl() {
+json=`echo -s https://$API_URL/$END_POINT \
+ -X $method \
+ -H "Authorization: Bearer $token" \
+ -H "Content-Type: application/json" \
+ -d "$data"`
+}
+
+sed_systemd() {
+  sed "s#INSTALLED_SCRIPTS#$INSTALLED_SCRIPTS#" \
+   $SCRIPT_LOCATION/files/systemd/$SERVICE | sudo tee /etc/systemd/system/$SERVICE > /dev/null
+}
+
+logoff_rerun() {
+  echo "------------------------------"
+  echo "-                            -"
+  echo "-  logoff and on again       -"
+  echo "-          then              -"
+  echo "-                            -"
+  echo "-   rerun ~/fm_install.sh    -"
+  echo "------------------------------"
+  exit 1
+}
+
+reboot_rerun() {
+  echo "-------------------------------"
+  echo "-                             -"
+  echo "-      reboot server          -"
+  echo "-           then              -"
+  echo "-   rerun ~/fm_install.sh     -"
+  echo "-                             -"
+  echo "-------------------------------"
+  exit 1
+}
+
+upgrade_filemaker() {
+  echo "upgrade filemaker"
+  echo "........."
+}
+
+# The purpose of this is to execute commands to setup/configure filemaker, but checking to see if filemaker
+# is being installed either natively or in a docker container, and adjusting the command to suit.
+# executeCMD() {
+#   if [ "$FM_DOCKER" == "true" ];then
+#     docker exec ${FM_NAME}-primary bash -c "$1" || { echo "$2"; exit 1; }
+#   else
+#     $1 || { echo "$2"; exit 1; }
+#   fi
+# }
+
+executeCMD() {
+  x=$1
+  if [ "$FM_DOCKER" == "true" ];then
+    #strip out sudo if running in a docker container
+    if [[ "$x" == sudo* ]]; then
+      x="${x#sudo }"
+    fi
+    docker exec ${FM_NAME}-primary bash -c "$x" || { echo "$2"; exit 1; }
+  else
+    $x || { echo "$2"; exit 1; }
+  fi
+}

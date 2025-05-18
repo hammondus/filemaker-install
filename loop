@@ -1,0 +1,54 @@
+#!/bin/bash
+
+#
+# When testing the admin api, the token will timeout within 15 minutes.
+# You can't however get a new admin api token every time you run the script as there is a limit on how many
+# the server will hand out.
+
+# For testing and development purposes, after getting a token, put it in this script, which will poll
+# the server with it every 5 minutes, keeping the token alive.
+
+# When doing this, in the fm_install.sh script, comment out the section that gets a new token.
+
+
+#token for testing
+
+. ./functions
+
+
+FM_DOCKER=true
+FM_NAME="fms21.1.4.400"
+
+HOSTNAME="localhost"
+token=eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzaWQiOiIwZmI5NjBjOC1iMjU4LTQ3NTAtOWUwYS0yNGI5NjJmYzM0YzQiLCJpYXQiOjE3NDcwNTA1Nzl9.BrUmGfCPTrj9RNBPqpx_CjyAnbayK5z5tDi2cU8t7I4
+token=eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzaWQiOiJiYTExODExNi1mMTNlLTRjZDItYmQ3Yy1mYjhhOGRkYWVhY2IiLCJpYXQiOjE3NDcwNTI3Mjh9.fx13CjdmLCHOM_FTpVt4pgZDiYsv45-DAp1Cq3fScqs
+#docker exec -c json=`executeCMD "curl -ks https://$HOSTNAME/fmi/admin/api/v2/server/metadata \
+# json=`executeCMD "curl -ks https://$HOSTNAME/fmi/admin/api/v2/server/metadata \
+#  -H 'Authorization: Bearer $token' \
+#  -H 'Content-Type: application/json'" "data api failed"`
+
+#  json=`executeCMD "curl -ks https://$API_URL/user/auth \
+#   -X POST \
+#   -H 'Authorization: Basic $AUTH' \
+#   -H 'Content-Type: application/json'" "data api failed"`
+
+
+while true
+do
+
+  #Check token works
+json=`executeCMD "curl -ks https://$HOSTNAME/fmi/admin/api/v2/server/metadata \
+ -H 'Authorization: Bearer $token' \
+ -H 'Content-Type: application/json'" "data api failed"`
+ 
+  ok=`echo $json | jq --raw-output '.messages[0].text'`
+
+  if [ "$ok" != 'OK' ]; then
+    echo "Token not working"
+    echo $json
+    exit 9
+  fi
+
+  echo $json | jq .response.ServerHostTime
+  sleep 300  # 5 minutes
+done
